@@ -1,23 +1,24 @@
 # sellingpoint — 법원경매 낙찰가율 조회
 
-법원 매각통계에서 소재지(시도·시군구)×기간별 **용도별 매각가율(=낙찰가율)** 을
-가져오는 React+Vite 앱. Vercel 서버리스 프록시로 CORS/WAF 우회.
+법원 매각통계에서 소재지(시도·시군구)×기간별 용도별 매각가율(=낙찰가율)을 가져오는 React+Vite 앱.
 
 ## 실행
 ```
 npm install
-vercel dev        # 로컬(내 한국 IP로 호출) — 가장 확실
-# 또는: npm run build && vercel --prod   (icn1 서울 리전)
+vercel dev        # 로컬(한국 IP) — WAF 안전. 엑셀 대량수집도 이걸로.
 ```
 
-## API (서버리스 프록시)
-- `api/court-stats.js` — selectRletCortDspslStats.on. 본문 {searchType:"02", adongSdCd, adongSggCd, startDate, endDate(YYYYMM)}. cortOfcCd는 소재지모드에서 무시되어 빈값 전송.
-- `api/court-adong.js` — selectAdong.on. ty="2"+sidoCode → 법원이 쓰는 실제 시군구 코드 목록.
+## 기능
+- 조회: 시도·시군구·기간 선택 → 용도별 매각가율 표(한글 라벨·정합성 체크·CSV).
+- **엑셀 받기(구별)**: 시도 선택 시 그 시도의 구 전체를 순회해 xlsx 1개. 특정 구만 고르면 그 구만.
+- **전국 엑셀(zip)**: 시도 미선택 시 17개 시도를 전부 순회 → 시도별 xlsx를 zip 하나로(탭 아닌 파일별). 강원/전북은 신코드(51/52) 자동 보정.
+  특정 구를 고른 경우 그 구만. 파일명 `매각통계_{시도}_{startYM}_{endYM}.xlsx`.
+- 기간 빠른 선택(최근 3/6/12개월·올해).
 
-## 화면 (src/App.jsx)
-- 기간(연/월) + **빠른선택(최근 3/6/12개월·올해)** + 시도 + 시군구(법원 코드 라이브) → 조회.
-- 응답 행 자동 표 + 매각가율 컬럼 강조 + CSV 내려받기.
+## API
+- `api/court-stats.js` — selectRletCortDspslStats.on. adongSggCd는 **뒤 3자리**만 전송(법정동 11680 강남구 → "680").
+- `api/court-adong.js` — selectAdong.on. 시군구 목록.
 
-## 첫 조회 확인사항
-- WAF/IP 차단 시 502 → vercel dev(집 IP) 또는 EC2(서울 IP)에서 호출.
-- 컬럼명이 영문코드로 뜨면, 매각가율 컬럼 확인 후 한글 라벨링 예정.
+## 비고
+- 시군구 코드 규칙: 법정동 5자리에서 앞 2자리 떼고 뒤 3자리. cortOfcCd는 소재지모드에서 무시되어 빈값.
+- 컬럼: lclDspslGdsLstUsgNm=물건용도, dspslAmtRate=매각가율, dspslRate=매각율, aeeEvlGrsAmt=감정가, dspslGrsAmt=매각가.

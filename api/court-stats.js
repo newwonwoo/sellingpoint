@@ -26,7 +26,8 @@ export default async function handler(req, res) {
     const raw = req.method === "POST" ? req.body : req.query;
     const body = typeof raw === "string" ? JSON.parse(raw || "{}") : raw || {};
     const sidoCode = body.sidoCode || "";       // 시도 2자리 (11=서울). 빈값=전국
-    const sigunguCode = body.sigunguCode || "";  // 시군구 (빈값=전체)
+    // 시군구: 법원은 '뒤 3자리'만 받는다. (법정동 11680 강남구 → "680")
+    const sigunguCode = (body.sigunguCode || "").slice(-3);
     const startYM = String(body.startYM || "").replace(/-/g, ""); // YYYYMM
     const endYM = String(body.endYM || "").replace(/-/g, "");
 
