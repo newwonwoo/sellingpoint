@@ -90,8 +90,14 @@ tbody tr:hover td { background: #f1f5f9; }
 td.num { text-align: right; font-family: var(--mono); font-variant-numeric: tabular-nums; }
 td.left { text-align: left; font-family: inherit; }
 
-/* 소계/전체 행 */
-tr.subtot td { font-weight: 700; background: #eef2f7 !important; }
+/* 용도 위계 */
+td.indent { padding-left: 30px; color: #3b4759; }                 /* 세부용도: 들여쓰기 */
+tr.cat td.left { font-weight: 600; }                               /* 단일 대표(아파트·연립) */
+tr.ingroup td.left { box-shadow: inset 3px 0 0 #d3dbe6; }          /* 그룹 좌측 액센트 */
+tr.subtot td { font-weight: 700; background: #eef2f7 !important; border-top: 1px solid #cdd6e2; }
+tr.subtot td.left { box-shadow: inset 3px 0 0 #9fb0c4; color: #2a3645; }
+tr.grandtotal td { font-weight: 800; background: #dde7f0 !important; border-top: 2px solid var(--teal); border-bottom: 2px solid var(--teal); }
+tr.grandtotal td.left { color: var(--ink); }
 /* 정합성 불일치 */
 tr.bad td { background: #fef4f3 !important; }
 

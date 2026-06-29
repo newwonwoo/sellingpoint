@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import * as XLSX from "xlsx";
+import * as XLSX from "xlsx-js-style";
 import JSZip from "jszip";
 import regions from "./regions.json";
 
@@ -63,6 +63,52 @@ function RateBar({ v, bad }) {
       <span className="ratebar"><i style={{ width: `${w}%` }} /></span>
     </div>
   );
+}
+
+// 엑셀 스타일링: 헤더 음영 + 소계/전체 강조 + 매각가율 컬럼 밴드색(가장 중요한 정보)
+const XL_COLS = ["시도", "시군구", "물건용도", "경매건수", "매각건수", "감정가(원)", "매각가(원)", "매각율(%)", "매각가율(%)"];
+function styleSheet(ws, rows) {
+  const RATE = 8;
+  const line = { style: "thin", color: { rgb: "D7DEE8" } };
+  const box = { top: line, bottom: line, left: line, right: line };
+  // 헤더
+  for (let c = 0; c < XL_COLS.length; c++) {
+    const ref = XLSX.utils.encode_cell({ r: 0, c });
+    if (!ws[ref]) continue;
+    ws[ref].s = {
+      fill: { patternType: "solid", fgColor: { rgb: c === RATE ? "084A3D" : "0C6B58" } },
+      font: { color: { rgb: "FFFFFF" }, bold: true, sz: 11 },
+      alignment: { horizontal: "center", vertical: "center" }, border: box,
+    };
+  }
+  rows.forEach((row, i) => {
+    const R = i + 1;
+    const nm = String(row["물건용도"] || "");
+    const isTotal = nm === "전체";
+    const isSub = /소계$/.test(nm);
+    const rowFill = isTotal ? "DDE7F0" : isSub ? "EEF2F7" : null;
+    for (let c = 0; c < XL_COLS.length; c++) {
+      const ref = XLSX.utils.encode_cell({ r: R, c });
+      if (!ws[ref]) continue;
+      const s = { border: box, alignment: { vertical: "center", horizontal: c <= 2 ? "left" : "right" } };
+      if (rowFill) s.fill = { patternType: "solid", fgColor: { rgb: rowFill } };
+      if (isTotal || isSub) s.font = { bold: true };
+      if (c >= 3 && c <= 6) s.numFmt = "#,##0";
+      if (c === 7) s.numFmt = "0.0";
+      if (c === RATE) {
+        const v = num(row[XL_COLS[RATE]]);
+        const band = v >= 100 ? { f: "0C6B58", b: "E6F3EF" } : v >= 80 ? { f: "B06F12", b: "FBF3E2" }
+          : v > 0 ? { f: "B3261E", b: "FBECEB" } : { f: "69748A", b: rowFill || "FFFFFF" };
+        s.fill = { patternType: "solid", fgColor: { rgb: band.b } };
+        s.font = { bold: true, color: { rgb: band.f }, sz: 11 };
+        s.numFmt = "0.0";
+      }
+      if (isTotal) s.border = { ...box, top: { style: "medium", color: { rgb: "0C6B58" } }, bottom: { style: "medium", color: { rgb: "0C6B58" } } };
+      ws[ref].s = s;
+    }
+  });
+  ws["!cols"] = [{ wch: 10 }, { wch: 12 }, { wch: 20 }, { wch: 9 }, { wch: 9 }, { wch: 16 }, { wch: 16 }, { wch: 9 }, { wch: 11 }];
+  return ws;
 }
 // 행 정합성: 매각건수≤경매건수, 매각율=매각/경매, 매각가율=매각가/감정가
 function checkRow(r) {
@@ -141,6 +187,28 @@ export default function App() {
     return gn ? `${sn} ${gn}` : sn;
   }, [sido, sigungu, sigunguOptions]);
 
+  // 위계 모델: 응답 header(대분류 그룹)로 묶어 세부/소계/전체/단일 구분
+  const model = useMemo(() => {
+    if (!known) return [];
+    const groups = [];
+    for (const r of rawRows) {
+      const h = r.header != null ? String(r.header) : (r.lclDspslGdsLstUsgNm || "");
+      const last = groups[groups.length - 1];
+      if (last && last.header === h) last.rows.push(r);
+      else groups.push({ header: h, rows: [r] });
+    }
+    const out = [];
+    for (const g of groups) {
+      const multi = g.rows.length > 1;
+      for (const r of g.rows) {
+        const name = r.lclDspslGdsLstUsgNm;
+        const kind = name === "전체" ? "total" : name === "소계" ? "subtotal" : (multi ? "detail" : "single");
+        out.push({ r, kind, group: g.header });
+      }
+    }
+    return out;
+  }, [rawRows, known]);
+
   function presetMonths(n) {
     const e = new Date(curY, now.getMonth(), 1);
     const s = new Date(curY, now.getMonth() - (n - 1), 1);
@@ -184,7 +252,8 @@ export default function App() {
     return code;
   }
   const mapRow = (sidoName, ggName, row) => ({
-    시도: sidoName, 시군구: ggName || "(전체)", 물건용도: row.lclDspslGdsLstUsgNm,
+    시도: sidoName, 시군구: ggName || "(전체)",
+    물건용도: row.lclDspslGdsLstUsgNm === "소계" && row.header ? `${row.header} 소계` : row.lclDspslGdsLstUsgNm,
     경매건수: num(row.auctnNum), 매각건수: num(row.dspslNum),
     "감정가(원)": num(row.aeeEvlGrsAmt), "매각가(원)": num(row.dspslGrsAmt),
     "매각율(%)": num(row.dspslRate), "매각가율(%)": num(row.dspslAmtRate),
@@ -207,8 +276,8 @@ export default function App() {
     return { rows, fail };
   }
   function toWorkbook(rows, sheetName) {
-    const ws = XLSX.utils.json_to_sheet(rows);
-    ws["!cols"] = [{ wch: 10 }, { wch: 12 }, { wch: 16 }, { wch: 9 }, { wch: 9 }, { wch: 16 }, { wch: 16 }, { wch: 9 }, { wch: 11 }];
+    const ws = XLSX.utils.json_to_sheet(rows, { header: XL_COLS });
+    styleSheet(ws, rows);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, sheetName.slice(0, 28));
     return wb;
@@ -368,16 +437,24 @@ export default function App() {
                   </th>
                 ))}</tr></thead>
                 <tbody>
-                  {rawRows.map((r, i) => {
-                    const sub = isSubtotal(r.lclDspslGdsLstUsgNm);
+                  {model.map((m, i) => {
+                    const r = m.r;
                     const ok = checkRow(r);
+                    const rowCls = m.kind === "total" ? "grandtotal" : m.kind === "subtotal" ? "subtot" : m.kind === "detail" ? "ingroup" : "cat";
                     return (
-                      <tr key={i} className={`${sub ? "subtot" : ""} ${ok ? "" : "bad"}`}>
-                        {SCHEMA.map((c) => (
-                          <td key={c.key} className={`${c.type === "text" ? "left" : "num"} ${c.emph ? "ratecol" : ""}`}>
-                            {c.emph ? <RateBar v={r[c.key]} bad={!ok} /> : fmtCell(c.type, r[c.key])}
-                          </td>
-                        ))}
+                      <tr key={i} className={`${rowCls} ${ok ? "" : "bad"}`}>
+                        {SCHEMA.map((c) => {
+                          if (c.type === "text") {
+                            let label = r[c.key];
+                            if (m.kind === "subtotal") label = m.group ? `${m.group} 소계` : "소계";
+                            return <td key={c.key} className={`left ${m.kind === "detail" ? "indent" : ""}`} title={label}>{label}</td>;
+                          }
+                          return (
+                            <td key={c.key} className={`num ${c.emph ? "ratecol" : ""}`}>
+                              {c.emph ? <RateBar v={r[c.key]} bad={!ok} /> : fmtCell(c.type, r[c.key])}
+                            </td>
+                          );
+                        })}
                       </tr>
                     );
                   })}
