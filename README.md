@@ -1,80 +1,23 @@
 # sellingpoint — 법원경매 낙찰가율 조회
 
-매각기일 기간을 입력하면 **행정구역(시도·시군구) × 용도별 낙찰가율**(매각가합 ÷ 감정가합)을
-집계해 표로 보여주고 CSV로 내려받는 웹앱. 채권관리 실익분석용.
+법원 매각통계에서 소재지(시도·시군구)×기간별 **용도별 매각가율(=낙찰가율)** 을
+가져오는 React+Vite 앱. Vercel 서버리스 프록시로 CORS/WAF 우회.
 
-## 구조 (왜 이렇게 만들었나)
-
+## 실행
 ```
-브라우저(React)  ──fetch──▶  /api/court-page (Vercel 서버리스)  ──▶  courtauction.go.kr JSON API
-   │                              (CORS·WAF 우회 프록시, 1호출=1페이지)
-   └─ 페이지 넘기기 + 집계 + CSV (클라이언트에서 처리 → 함수 타임아웃 회피)
-```
-
-- 브라우저에서 법원API를 직접 부르면 **CORS와 WAF로 막히므로**, 서버리스 함수가 대신 호출한다.
-- 한 번 호출 = 한 페이지(40건)라 Vercel 함수 실행시간 제한을 넘기지 않는다.
-- 페이지 넘기기·집계·CSV는 프론트가 담당(진행 중 부분결과도 표시).
-
-## 파일
-
-```
-api/court-page.js   # 서버리스 프록시 (법원 한 페이지 받아오기)
-src/aggregate.js    # 집계 로직 (시도×시군구×용도 낙찰가율) — 프론트와 공용
-src/App.jsx         # 화면 + 페이지네이션 루프
-src/main.jsx, styles.css, index.html
-```
-
-## 1) 로컬에서 먼저 작동 확인 (EC2/배포 전 필수)
-
-```bash
 npm install
-npm i -g vercel        # 한 번만
-vercel dev             # http://localhost:3000
+vercel dev        # 로컬(내 한국 IP로 호출) — 가장 확실
+# 또는: npm run build && vercel --prod   (icn1 서울 리전)
 ```
 
-`vercel dev`는 프론트와 `/api` 함수를 같이 띄우고, 법원 호출이 **내 PC의 IP(한국)** 로 나간다.
-화면에서 매각기일 기간(예: 지난달)을 넣고 **조회** → 표가 채워지면 성공.
+## API (서버리스 프록시)
+- `api/court-stats.js` — selectRletCortDspslStats.on. 본문 {searchType:"02", adongSdCd, adongSggCd, startDate, endDate(YYYYMM)}. cortOfcCd는 소재지모드에서 무시되어 빈값 전송.
+- `api/court-adong.js` — selectAdong.on. ty="2"+sidoCode → 법원이 쓰는 실제 시군구 코드 목록.
 
-> 참고: `npm run dev`(순수 vite)로는 `/api`가 없어서 조회가 안 된다. 반드시 `vercel dev` 사용.
+## 화면 (src/App.jsx)
+- 기간(연/월) + **빠른선택(최근 3/6/12개월·올해)** + 시도 + 시군구(법원 코드 라이브) → 조회.
+- 응답 행 자동 표 + 매각가율 컬럼 강조 + CSV 내려받기.
 
-## 2) GitHub 레포에 올리기
-
-```bash
-git init
-git add .
-git commit -m "init: 법원경매 낙찰가율 조회 웹앱"
-git branch -M main
-git remote add origin https://github.com/newwonwoo/sellingpoint.git
-git push -u origin main
-```
-
-## 3) Vercel 배포
-
-1. vercel.com → Add New → Project → `newwonwoo/sellingpoint` import
-2. Framework: **Vite** 자동 감지 / 빌드설정 그대로 두고 Deploy
-3. 이후 `git push`만 하면 자동 재배포
-
-## IP 차단 대응 — 함수 리전을 서울(icn1)로 고정
-
-법원 사이트에 봇 차단(WAF)이 있다. 가장 흔한 원인은 **외국 IP(지오 차단)** 이라, 함수 리전을
-서울로 두면 이그레스 IP가 한국 AWS(ap-northeast-2)가 되어 이 문제가 사라진다.
-`vercel.json` 에 이미 설정해 뒀다:
-
-```json
-{ "regions": ["icn1"] }
-```
-
-> 빌드 리전(iad1 등)과 **함수 실행 리전은 별개**다. 실제 법원 호출은 함수 실행 리전(=icn1)에서
-> 나가므로, 빌드가 미국에서 돌아도 무관하다. 정적 파일은 어차피 전 리전에 배포된다.
-
-남는 리스크(작음): icn1도 **데이터센터 IP**라 WAF가 ASN/데이터센터 평판으로 거른다면 여전히
-막힐 수 있다. 다만 한국 합법 서비스 상당수가 AWS 서울에서 도므로 가능성은 낮다. 그래도 막히면:
-
-- 대안: 같은 `api/court-page.js` 로직을 **EC2(서울 IP, 43.201.133.119)** 에 올려 프록시로 쓰고
-  프론트 `fetch` 경로만 그 EC2 주소로 바꾼다.
-- 호출 간격(`PAGE_DELAY`, 기본 1.2초)은 너무 줄이지 말 것. 두 달 1회 배치 용도면 충분히 안전.
-
-## 다음 단계(예정)
-
-- EC2 cron(격월) 적재 + 회사DB 연계
-- 실익분석 회수율 보정계수(선순위·집행비용 차감) 반영
+## 첫 조회 확인사항
+- WAF/IP 차단 시 502 → vercel dev(집 IP) 또는 EC2(서울 IP)에서 호출.
+- 컬럼명이 영문코드로 뜨면, 매각가율 컬럼 확인 후 한글 라벨링 예정.
