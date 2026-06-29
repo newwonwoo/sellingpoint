@@ -67,7 +67,7 @@ function RateBar({ v, bad }) {
 
 // 엑셀 스타일링: 헤더 음영 + 소계/전체 강조 + 매각가율 컬럼 밴드색(가장 중요한 정보)
 const XL_COLS = ["시도", "시군구", "물건용도", "경매건수", "매각건수", "감정가(원)", "매각가(원)", "매각율(%)", "매각가율(%)"];
-function styleSheet(ws, rows) {
+function styleSheet(ws, rows, kinds) {
   const RATE = 8;
   const line = { style: "thin", color: { rgb: "D7DEE8" } };
   const box = { top: line, bottom: line, left: line, right: line };
@@ -84,21 +84,23 @@ function styleSheet(ws, rows) {
   rows.forEach((row, i) => {
     const R = i + 1;
     const nm = String(row["물건용도"] || "");
-    const isTotal = nm === "전체";
-    const isSub = /소계$/.test(nm);
+    const kind = (kinds && kinds[i]) || (nm === "전체" ? "total" : /소계$/.test(nm) ? "subtotal" : "single");
+    const isTotal = kind === "total", isSub = kind === "subtotal", isDetail = kind === "detail";
     const rowFill = isTotal ? "DDE7F0" : isSub ? "EEF2F7" : null;
     for (let c = 0; c < XL_COLS.length; c++) {
       const ref = XLSX.utils.encode_cell({ r: R, c });
       if (!ws[ref]) continue;
-      const s = { border: box, alignment: { vertical: "center", horizontal: c <= 2 ? "left" : "right" } };
+      const align = { vertical: "center", horizontal: c <= 2 ? "left" : "right" };
+      if (c === 2 && isDetail) align.indent = 2;     // 세부용도 들여쓰기
+      const s = { border: box, alignment: align };
       if (rowFill) s.fill = { patternType: "solid", fgColor: { rgb: rowFill } };
       if (isTotal || isSub) s.font = { bold: true };
       if (c >= 3 && c <= 6) s.numFmt = "#,##0";
       if (c === 7) s.numFmt = "0.0";
       if (c === RATE) {
         const v = num(row[XL_COLS[RATE]]);
-        const band = v >= 100 ? { f: "0C6B58", b: "E6F3EF" } : v >= 80 ? { f: "B06F12", b: "FBF3E2" }
-          : v > 0 ? { f: "B3261E", b: "FBECEB" } : { f: "69748A", b: rowFill || "FFFFFF" };
+        const band = v >= 100 ? { f: "0C6B58", b: "C7E8DD" } : v >= 80 ? { f: "8A5200", b: "FBE6BE" }
+          : v > 0 ? { f: "8E1B16", b: "F7CFCC" } : { f: "69748A", b: rowFill || "FFFFFF" };
         s.fill = { patternType: "solid", fgColor: { rgb: band.b } };
         s.font = { bold: true, color: { rgb: band.f }, sz: 11 };
         s.numFmt = "0.0";
@@ -107,8 +109,39 @@ function styleSheet(ws, rows) {
       ws[ref].s = s;
     }
   });
-  ws["!cols"] = [{ wch: 10 }, { wch: 12 }, { wch: 20 }, { wch: 9 }, { wch: 9 }, { wch: 16 }, { wch: 16 }, { wch: 9 }, { wch: 11 }];
+  ws["!cols"] = [{ wch: 10 }, { wch: 12 }, { wch: 22 }, { wch: 9 }, { wch: 9 }, { wch: 16 }, { wch: 16 }, { wch: 9 }, { wch: 11 }];
   return ws;
+}
+// 매각통계 위계: 대분류 코드(lclDspslGdsLstUsgCd)로 묶어 단일/세부/소계/전체 구분
+// ⚠ 법원 응답엔 'header' 필드가 없음 → 반드시 대분류 코드로 그룹핑
+const GRP_KEYS = ["lclDspslGdsLstUsgCd", "lclAuctnGdsUsgCd"];
+function grpKey(r) {
+  for (const k of GRP_KEYS) if (r[k] != null && r[k] !== "") return String(r[k]);
+  return r.lclDspslGdsLstUsgNm || "";
+}
+function groupRows(rows) {
+  const groups = [];
+  for (const r of rows || []) {
+    const k = grpKey(r);
+    const last = groups[groups.length - 1];
+    if (last && last.k === k) last.rows.push(r);
+    else groups.push({ k, rows: [r] });
+  }
+  const out = [];
+  for (const g of groups) {
+    const multi = g.rows.length > 1;
+    const leaves = g.rows.map((r) => r.lclDspslGdsLstUsgNm);
+    const distinct = [...new Set(leaves)];
+    // 그룹 라벨: 그룹 내 용도명이 같으면 그게 대분류명, 다르면 세부(겸용/소계/전체 제외) 합성
+    const label = distinct.length === 1 ? distinct[0]
+      : (leaves.filter((n) => n !== "겸용" && n !== "소계" && n !== "전체").join(",") || distinct[0]);
+    for (const r of g.rows) {
+      const name = r.lclDspslGdsLstUsgNm;
+      const kind = name === "전체" ? "total" : name === "소계" ? "subtotal" : (multi ? "detail" : "single");
+      out.push({ r, kind, group: label, leaf: name });
+    }
+  }
+  return out;
 }
 // 행 정합성: 매각건수≤경매건수, 매각율=매각/경매, 매각가율=매각가/감정가
 function checkRow(r) {
@@ -121,14 +154,69 @@ function checkRow(r) {
 }
 const isSubtotal = (name) => name === "소계" || name === "전체";
 
+// ── 2차 MVP: 주소 → 시군구 로컬 파싱 (외부 API 키 불필요) ──
+// 시도 별칭(신·구 명칭 모두) → regions.json 시도코드. 긴 별칭 먼저 매칭.
+const SIDO_ALIAS = [
+  ["서울", "11"], ["부산", "26"], ["대구", "27"], ["인천", "28"], ["광주광역시", "29"], ["광주", "29"],
+  ["대전", "30"], ["울산", "31"], ["세종", "36"], ["경기", "41"],
+  ["강원특별자치도", "42"], ["강원", "42"],
+  ["충청북도", "43"], ["충북", "43"], ["충청남도", "44"], ["충남", "44"],
+  ["전북특별자치도", "45"], ["전라북도", "45"], ["전북", "45"], ["전라남도", "46"], ["전남", "46"],
+  ["경상북도", "47"], ["경북", "47"], ["경상남도", "48"], ["경남", "48"],
+  ["제주", "50"],
+];
+const sidoName = (code) => (regions.sido.find((s) => s.code === code) || {}).name || "";
+// 주소 문자열에서 {시도코드, 시군구코드} 추출. 실패 시 needSgg/ambiguous/null.
+function parseAddress(addr) {
+  const a = (addr || "").trim().replace(/\s+/g, " ");
+  if (!a) return null;
+  const aNS = a.replace(/\s/g, "");
+  // 1) 시도 (광주=시도 vs 경기 광주시 충돌 방지: 문자열 맨앞에서만 시도 인정)
+  let sd = null;
+  for (const [alias, code] of SIDO_ALIAS) { if (a.startsWith(alias)) { sd = code; break; } }
+  // 2) 시군구: 해당 시도 목록에서 (공백제거) 부분일치, 긴 이름 우선("수원시 영통구")
+  const pick = (list) => {
+    const cands = [...(list || [])].sort((x, y) => y.name.length - x.name.length);
+    for (const c of cands) if (aNS.includes(c.name.replace(/\s/g, ""))) return c;
+    return null;
+  };
+  if (sd) {
+    const list = regions.sigungu[sd] || [];
+    let g = pick(list);
+    if (!g && list.length === 1) g = list[0]; // 세종 등 단일 구
+    if (g) return { sdCode: sd, sdName: sidoName(sd), sggCode: g.code, sggName: g.name };
+    return { sdCode: sd, sdName: sidoName(sd), needSgg: true };
+  }
+  // 3) 시도 없음 → 전국에서 유니크 구 탐색 (구명이 맨 앞에 와야 함: "남구" 등 부분일치 오탐 차단)
+  const pickPrefix = (list) => {
+    const cands = [...(list || [])].sort((x, y) => y.name.length - x.name.length);
+    for (const c of cands) if (aNS.startsWith(c.name.replace(/\s/g, ""))) return c;
+    return null;
+  };
+  const hits = [];
+  for (const s of regions.sido) { const g = pickPrefix(regions.sigungu[s.code]); if (g) hits.push({ sdCode: s.code, sdName: s.name, sggCode: g.code, sggName: g.name }); }
+  if (hits.length === 1) return hits[0];
+  if (hits.length > 1) return { ambiguous: hits };
+  return null;
+}
+// 응답 행에서 용도 드롭다운 목록(소계 제외, 전체 포함)
+function useOptions(rows) {
+  const seen = new Set(), out = [];
+  for (const r of rows || []) { const n = r.lclDspslGdsLstUsgNm; if (!n || n === "소계" || seen.has(n)) continue; seen.add(n); out.push(n); }
+  return out;
+}
+
 export default function App() {
   const now = new Date();
   const curY = now.getFullYear();
   const curM = String(now.getMonth() + 1).padStart(2, "0");
-  const [startY, setStartY] = useState(String(curY - 1));
-  const [startM, setStartM] = useState(curM);
-  const [endY, setEndY] = useState(String(curY));
-  const [endM, setEndM] = useState(curM);
+  const _lastE = new Date(curY, now.getMonth() - 1, 1);        // 지난달(완료된 마지막 달)
+  const _def12S = new Date(curY, now.getMonth() - 12, 1);      // 기본: 지난달 포함 12개월
+  const _p2 = (n) => String(n).padStart(2, "0");
+  const [startY, setStartY] = useState(String(_def12S.getFullYear()));
+  const [startM, setStartM] = useState(_p2(_def12S.getMonth() + 1));
+  const [endY, setEndY] = useState(String(_lastE.getFullYear()));
+  const [endM, setEndM] = useState(_p2(_lastE.getMonth() + 1));
   const [sido, setSido] = useState("");
   const [sigungu, setSigungu] = useState("");
   const [sgList, setSgList] = useState(null);
@@ -138,6 +226,17 @@ export default function App() {
   const [resp, setResp] = useState(null);
   const [dlBusy, setDlBusy] = useState(false);
   const [dlMsg, setDlMsg] = useState("");
+
+  // ── 2차 MVP: 주소조회 상태 ──
+  const [addr, setAddr] = useState("");
+  const [aLoc, setALoc] = useState(null);     // {sdCode,sdName,sggCode,sggName}
+  const [aData, setAData] = useState(null);   // {m6,y1,y3} 각 기간 응답 행 배열
+  const [aUse, setAUse] = useState("");       // 선택 용도
+  const [aBusy, setABusy] = useState(false);
+  const [aErr, setAErr] = useState("");
+  const [aMsg, setAMsg] = useState("");
+  const [aSido, setASido] = useState("");     // 수동 fallback
+  const [aSgg, setASgg] = useState("");
 
   useEffect(() => {
     setSigungu(""); setSgList(null);
@@ -187,35 +286,21 @@ export default function App() {
     return gn ? `${sn} ${gn}` : sn;
   }, [sido, sigungu, sigunguOptions]);
 
-  // 위계 모델: 응답 header(대분류 그룹)로 묶어 세부/소계/전체/단일 구분
-  const model = useMemo(() => {
-    if (!known) return [];
-    const groups = [];
-    for (const r of rawRows) {
-      const h = r.header != null ? String(r.header) : (r.lclDspslGdsLstUsgNm || "");
-      const last = groups[groups.length - 1];
-      if (last && last.header === h) last.rows.push(r);
-      else groups.push({ header: h, rows: [r] });
-    }
-    const out = [];
-    for (const g of groups) {
-      const multi = g.rows.length > 1;
-      for (const r of g.rows) {
-        const name = r.lclDspslGdsLstUsgNm;
-        const kind = name === "전체" ? "total" : name === "소계" ? "subtotal" : (multi ? "detail" : "single");
-        out.push({ r, kind, group: g.header });
-      }
-    }
-    return out;
-  }, [rawRows, known]);
+  // 위계 모델: 대분류 코드로 묶어 단일/세부/소계/전체 구분 (화면·엑셀 공용 groupRows)
+  const model = useMemo(() => (known ? groupRows(rawRows) : []), [rawRows, known]);
 
   function presetMonths(n) {
-    const e = new Date(curY, now.getMonth(), 1);
-    const s = new Date(curY, now.getMonth() - (n - 1), 1);
+    const e = new Date(curY, now.getMonth() - 1, 1);   // 지난달(이번달 데이터 미완성이라 제외)
+    const s = new Date(curY, now.getMonth() - n, 1);    // 지난달 포함 N개월
     setStartY(String(s.getFullYear())); setStartM(String(s.getMonth() + 1).padStart(2, "0"));
     setEndY(String(e.getFullYear())); setEndM(String(e.getMonth() + 1).padStart(2, "0"));
   }
-  const presetThisYear = () => { setStartY(String(curY)); setStartM("01"); setEndY(String(curY)); setEndM(curM); };
+  const presetThisYear = () => {
+    setStartY(String(curY)); setStartM("01");
+    // 올해 1월 ~ 지난달(이번달 미완성 제외). 1월이면 지난달이 작년이라 1월로 클램프.
+    const em = now.getMonth() === 0 ? 1 : now.getMonth();
+    setEndY(String(curY)); setEndM(_p2(em));
+  };
 
   async function run() {
     setBusy(true); setError(""); setResp(null); setStatus("조회 중…");
@@ -251,33 +336,108 @@ export default function App() {
     for (const c of cands) { try { if ((await fetchStatsRows(c, "")).length) return c; } catch {} }
     return code;
   }
-  const mapRow = (sidoName, ggName, row) => ({
-    시도: sidoName, 시군구: ggName || "(전체)",
-    물건용도: row.lclDspslGdsLstUsgNm === "소계" && row.header ? `${row.header} 소계` : row.lclDspslGdsLstUsgNm,
-    경매건수: num(row.auctnNum), 매각건수: num(row.dspslNum),
-    "감정가(원)": num(row.aeeEvlGrsAmt), "매각가(원)": num(row.dspslGrsAmt),
-    "매각율(%)": num(row.dspslRate), "매각가율(%)": num(row.dspslAmtRate),
+
+  // ── 2차 MVP: 최근 N개월 롤링 구간 ──
+  function rollWindow(months) {
+    const ym = (d) => `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, "0")}`;
+    const e = new Date(curY, now.getMonth() - 1, 1);     // 지난달(이번달 미완성 제외)
+    const s = new Date(curY, now.getMonth() - months, 1); // 지난달 포함 N개월
+    const f = (v) => `${v.slice(0, 4)}.${v.slice(4)}`;
+    return { startYM: ym(s), endYM: ym(e), label: `${f(ym(s))}~${f(ym(e))}` };
+  }
+  const PERIODS = [{ key: "m6", months: 6, name: "6개월" }, { key: "y1", months: 12, name: "1년" }, { key: "y3", months: 36, name: "3년" }];
+  // 주소→구 확정된 loc으로 6개월·1년·3년 통계 동시 조회
+  async function lookupByAddress(loc) {
+    setABusy(true); setAErr(""); setAData(null); setAUse(""); setAMsg("");
+    try {
+      const eff = await resolveSido(loc.sdCode);
+      const sgg = String(loc.sggCode).slice(-3);
+      const calls = PERIODS.map(async (p) => {
+        const { startYM, endYM, label } = rollWindow(p.months);
+        const r = await fetch("/api/court-stats", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sidoCode: eff, sigunguCode: sgg, startYM, endYM }),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error([data.error, data.hint].filter(Boolean).join(" — "));
+        return { key: p.key, rows: findRows(data), label };
+      });
+      const settled = await Promise.all(calls);
+      const data = {};
+      for (const s of settled) data[s.key] = { rows: s.rows, label: s.label };
+      if (!PERIODS.some((p) => data[p.key]?.rows?.length)) throw new Error("해당 구간 통계 행이 없습니다(원본 응답 확인 필요)");
+      setAData(data);
+      const longest = data.y3?.rows?.length ? data.y3.rows : data.y1?.rows?.length ? data.y1.rows : data.m6.rows;
+      const uses = useOptions(longest);
+      setAUse(uses.find((u) => u.includes("아파트")) || uses[0] || "");
+      const nm = loc.sggName && loc.sggName !== loc.sdName ? `${loc.sdName} ${loc.sggName}` : loc.sdName;
+      setAMsg(nm);
+    } catch (e) { setAErr(String(e.message || e)); }
+    finally { setABusy(false); }
+  }
+  function onAddrSearch() {
+    setAErr(""); setALoc(null);
+    const p = parseAddress(addr);
+    if (!p) { setAErr("주소에서 시군구를 찾지 못했습니다. 아래에서 직접 선택하세요."); return; }
+    if (p.ambiguous) { setAErr(`여러 지역(${p.ambiguous.map((h) => h.sdName).join("/")})과 일치합니다. 아래에서 직접 선택하세요.`); return; }
+    if (p.needSgg) { setAErr(`${p.sdName} 안에서 구/군을 찾지 못했습니다. 아래에서 직접 선택하세요.`); setASido(p.sdCode); return; }
+    setALoc(p); lookupByAddress(p);
+  }
+  function onManualLookup() {
+    if (!aSido || !aSgg) { setAErr("시도와 구/군을 선택하세요"); return; }
+    const g = (regions.sigungu[aSido] || []).find((x) => String(x.code) === String(aSgg));
+    const loc = { sdCode: aSido, sdName: sidoName(aSido), sggCode: aSgg, sggName: g ? g.name : "" };
+    setALoc(loc); lookupByAddress(loc);
+  }
+  // 선택 용도의 기간별 낙찰가율 + 보조지표
+  const aCells = useMemo(() => {
+    if (!aData || !aUse) return null;
+    return PERIODS.map((p) => {
+      const d = aData[p.key];
+      const r = d?.rows?.find((x) => x.lclDspslGdsLstUsgNm === aUse);
+      const rate = r ? num(r.dspslAmtRate) : null;
+      const band = rate == null ? "na" : rate >= 100 ? "hi" : rate >= 80 ? "mid" : rate > 0 ? "lo" : "na";
+      return {
+        name: p.name, label: d?.label || "", rate, band,
+        auc: r ? num(r.auctnNum) : 0, sold: r ? num(r.dspslNum) : 0,
+        evl: r ? num(r.aeeEvlGrsAmt) : 0, sale: r ? num(r.dspslGrsAmt) : 0,
+        bad: r ? !checkRow(r) : false,
+      };
+    });
+  }, [aData, aUse]);
+  const aUseList = useMemo(() => {
+    if (!aData) return [];
+    const longest = aData.y3?.rows?.length ? aData.y3.rows : aData.y1?.rows?.length ? aData.y1.rows : aData.m6?.rows || [];
+    return useOptions(longest);
+  }, [aData]);
+  // 엑셀 행: 위계 item → 라벨(소계=그룹명+소계, 전체, 세부/단일=용도명)
+  const excelLabel = (it) => it.kind === "total" ? "전체" : it.kind === "subtotal" ? `${it.group} 소계` : it.leaf;
+  const mapItem = (sidoName, ggName, it) => ({
+    시도: sidoName, 시군구: ggName || "(전체)", 물건용도: excelLabel(it),
+    경매건수: num(it.r.auctnNum), 매각건수: num(it.r.dspslNum),
+    "감정가(원)": num(it.r.aeeEvlGrsAmt), "매각가(원)": num(it.r.dspslGrsAmt),
+    "매각율(%)": num(it.r.dspslRate), "매각가율(%)": num(it.r.dspslAmtRate),
   });
-  // 한 시도의 구 전체 수집
+  // 한 시도의 구 전체 수집 (rows + kinds 동기 배열)
   async function collectSido(sd, onProg) {
     const eff = await resolveSido(sd.code);
     const list = regions.sigungu[sd.code] || [];
     const targets = list.length ? list : [{ code: "", name: "(전체)" }];
-    const rows = []; let fail = 0;
+    const rows = [], kinds = []; let fail = 0;
     for (let i = 0; i < targets.length; i++) {
       const g = targets[i];
       onProg && onProg(i + 1, targets.length, g.name || "(전체)");
       try {
-        for (const row of await fetchStatsRows(eff, g.code ? String(g.code).slice(-3) : ""))
-          rows.push(mapRow(sd.name, g.name, row));
+        const raw = await fetchStatsRows(eff, g.code ? String(g.code).slice(-3) : "");
+        for (const it of groupRows(raw)) { rows.push(mapItem(sd.name, g.name, it)); kinds.push(it.kind); }
       } catch { fail++; }
       await new Promise((res) => setTimeout(res, 120));
     }
-    return { rows, fail };
+    return { rows, kinds, fail };
   }
-  function toWorkbook(rows, sheetName) {
+  function toWorkbook(rows, kinds, sheetName) {
     const ws = XLSX.utils.json_to_sheet(rows, { header: XL_COLS });
-    styleSheet(ws, rows);
+    styleSheet(ws, rows, kinds);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, sheetName.slice(0, 28));
     return wb;
@@ -288,20 +448,21 @@ export default function App() {
     if (!sido) return downloadAllSido();
     setError(""); setDlBusy(true); setDlMsg("준비 중…");
     const sd = regions.sido.find((s) => s.code === sido) || { code: sido, name: sido };
-    let rows = [], fail = 0;
+    let rows = [], kinds = [], fail = 0;
     if (sigungu) {
       const name = sigunguOptions.find((g) => g.code === sigungu)?.name || "";
       setDlMsg(`수집 중 · ${name}`);
       try {
         const eff = await resolveSido(sd.code);
-        for (const row of await fetchStatsRows(eff, String(sigungu).slice(-3))) rows.push(mapRow(sd.name, name, row));
+        const raw = await fetchStatsRows(eff, String(sigungu).slice(-3));
+        for (const it of groupRows(raw)) { rows.push(mapItem(sd.name, name, it)); kinds.push(it.kind); }
       } catch { fail++; }
     } else {
       const res = await collectSido(sd, (i, t, nm) => setDlMsg(`수집 중 ${i}/${t} · ${nm}`));
-      rows = res.rows; fail = res.fail;
+      rows = res.rows; kinds = res.kinds; fail = res.fail;
     }
     if (!rows.length) { setError("수집된 데이터가 없습니다 (WAF/IP 차단 또는 해당 기간 데이터 없음)."); setDlBusy(false); setDlMsg(""); return; }
-    XLSX.writeFile(toWorkbook(rows, sd.name), `매각통계_${sd.name}_${periodTag()}.xlsx`);
+    XLSX.writeFile(toWorkbook(rows, kinds, sd.name), `매각통계_${sd.name}_${periodTag()}.xlsx`);
     setDlMsg(`완료 · ${rows.length}행${fail ? ` (실패 ${fail})` : ""}`);
     setDlBusy(false);
   }
@@ -313,11 +474,11 @@ export default function App() {
     let totalRows = 0, totalFail = 0;
     for (let s = 0; s < regions.sido.length; s++) {
       const sd = regions.sido[s];
-      const { rows, fail } = await collectSido(sd, (i, t, nm) =>
+      const { rows, kinds, fail } = await collectSido(sd, (i, t, nm) =>
         setDlMsg(`[${s + 1}/${regions.sido.length}] ${sd.name} · 구 ${i}/${t} ${nm}`));
       totalFail += fail;
       if (rows.length) {
-        zip.file(`매각통계_${sd.name}_${periodTag()}.xlsx`, XLSX.write(toWorkbook(rows, sd.name), { type: "array", bookType: "xlsx" }));
+        zip.file(`매각통계_${sd.name}_${periodTag()}.xlsx`, XLSX.write(toWorkbook(rows, kinds, sd.name), { type: "array", bookType: "xlsx" }));
         totalRows += rows.length;
       }
     }
@@ -361,6 +522,64 @@ export default function App() {
         <h1>법원경매 낙찰가율 조회</h1>
         <p className="sub">소재지·기간을 고르면 법원 매각통계의 용도별 매각가율(=낙찰가율)을 가져옵니다.</p>
       </header>
+
+      {/* ── 2차 MVP: 주소로 최근 6개월 낙찰가율 찾기 ── */}
+      <section className="panel addr">
+        <div className="addr-row">
+          <input
+            className="addr-in" value={addr} placeholder="주소 입력 (예: 서울특별시 강남구 테헤란로 152)"
+            onChange={(e) => setAddr(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter") onAddrSearch(); }}
+          />
+          <button className="go" onClick={onAddrSearch} disabled={aBusy}>{aBusy ? "조회 중…" : "낙찰가율 조회"}</button>
+        </div>
+        <div className="addr-hint">도로명·지번 모두 인식 · 통계는 소속 시군구 기준 · 최근 6개월 평균</div>
+
+        {aErr && (
+          <div className="addr-fallback">
+            <div className="status err">오류: {aErr}</div>
+            <div className="fb-controls">
+              <select value={aSido} onChange={(e) => { setASido(e.target.value); setASgg(""); }}>
+                <option value="">시도 선택</option>
+                {regions.sido.map((s) => <option key={s.code} value={s.code}>{s.name}</option>)}
+              </select>
+              <select value={aSgg} onChange={(e) => setASgg(e.target.value)} disabled={!aSido}>
+                <option value="">{aSido ? "구/군 선택" : "—"}</option>
+                {(regions.sigungu[aSido] || []).map((g) => <option key={g.code} value={g.code}>{g.name}</option>)}
+              </select>
+              <button className="go" onClick={onManualLookup} disabled={aBusy || !aSgg}>조회</button>
+            </div>
+          </div>
+        )}
+
+        {aCells && (
+          <div className="addr-result">
+            <div className="ar-head">
+              <div className="ar-loc">{aMsg} · 평균 낙찰가율</div>
+              <label className="ar-use">
+                <span>용도</span>
+                <select value={aUse} onChange={(e) => setAUse(e.target.value)}>
+                  {aUseList.map((u) => <option key={u} value={u}>{u}</option>)}
+                </select>
+              </label>
+            </div>
+            <div className="ar-cards">
+              {aCells.map((c) => (
+                <div key={c.name} className={`ar-card ${c.band}`}>
+                  <div className="ac-term">{c.name} 가중평균</div>
+                  <div className="ac-rate">{c.rate == null ? "-" : c.rate.toFixed(1)}<small>%</small>{c.bad ? <span className="ac-warn"> ⚠</span> : null}</div>
+                  <div className="ac-meta">{c.label}</div>
+                  <div className="ac-cnt">경매 {c.auc.toLocaleString()} · 매각 {c.sold.toLocaleString()}건</div>
+                  <div className="ac-basis">매각가 {fmtEok(c.sale)}억 ÷ 감정가 {fmtEok(c.evl)}억</div>
+                </div>
+              ))}
+            </div>
+            <div className="ar-note">※ 매각가율 = 구간 매각가합 ÷ 감정가합 × 100 (기간 가중평균) · 최소단위 시군구 · 이번달 제외</div>
+          </div>
+        )}
+      </section>
+
+      <div className="section-div">상세 통계 (지역·기간 직접 선택)</div>
 
       <section className="panel controls">
         <label><span>기간 시작</span>

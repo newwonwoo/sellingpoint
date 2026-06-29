@@ -132,3 +132,80 @@ tr.bad td { background: #fef4f3 !important; }
   .stats { grid-template-columns: 1fr 1fr; }
   table { font-size: 13px; }
 }
+
+/* ── 2차 MVP: 주소조회 ── */
+.panel.addr { display: flex; flex-direction: column; gap: 10px; }
+.addr-row { display: flex; gap: 10px; }
+.addr-in {
+  flex: 1; padding: 13px 14px; font-size: 15px; border-radius: 10px;
+  border: 1px solid var(--line); background: var(--card2, #0e1726); color: var(--ink);
+}
+.addr-in:focus { outline: none; border-color: var(--teal); box-shadow: 0 0 0 3px rgba(12,107,88,.25); }
+.addr-hint { font-size: 12px; color: var(--muted); }
+.addr-fallback { display: flex; flex-direction: column; gap: 8px; }
+.fb-controls { display: flex; gap: 8px; flex-wrap: wrap; }
+.fb-controls select {
+  padding: 10px 12px; border-radius: 9px; border: 1px solid var(--line);
+  background: var(--card2, #0e1726); color: var(--ink); font-size: 14px;
+}
+.addr-result {
+  border: 1px solid var(--line); border-radius: 12px; padding: 16px;
+  background: linear-gradient(180deg, rgba(255,255,255,.02), transparent);
+  border-left: 4px solid var(--muted);
+}
+.addr-result.hi { border-left-color: var(--teal); }
+.addr-result.mid { border-left-color: var(--amber, #b06f12); }
+.addr-result.lo { border-left-color: var(--red, #b3261e); }
+.ar-loc { font-size: 13px; color: var(--muted); margin-bottom: 10px; }
+.ar-main { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.ar-use { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
+.ar-use select {
+  padding: 11px 13px; border-radius: 9px; border: 1px solid var(--line);
+  background: var(--card2, #0e1726); color: var(--ink); font-size: 15px; min-width: 180px;
+}
+.ar-rate { text-align: right; }
+.ar-big { font-size: 46px; font-weight: 800; line-height: 1; letter-spacing: -1px; }
+.ar-big small { font-size: 22px; font-weight: 600; margin-left: 3px; }
+.addr-result.hi .ar-big { color: var(--teal); }
+.addr-result.mid .ar-big { color: var(--amber, #b06f12); }
+.addr-result.lo .ar-big { color: var(--red, #b3261e); }
+.ar-cap { font-size: 12px; color: var(--muted); margin-top: 4px; }
+.ar-sub {
+  display: flex; gap: 18px; flex-wrap: wrap; margin-top: 14px; padding-top: 12px;
+  border-top: 1px dashed var(--line); font-size: 13px; color: var(--muted);
+}
+.ar-sub b { color: var(--ink); font-weight: 700; }
+.section-div {
+  margin: 22px 0 4px; font-size: 13px; font-weight: 700; color: var(--muted);
+  letter-spacing: .3px; display: flex; align-items: center; gap: 10px;
+}
+.section-div::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+@media (max-width: 640px) {
+  .ar-main { flex-direction: column; align-items: stretch; }
+  .ar-rate { text-align: left; }
+}
+
+/* 주소조회 3기간 카드 */
+.ar-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
+.ar-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+.ar-card {
+  border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px;
+  background: var(--card2, #0e1726); border-top: 3px solid var(--muted);
+}
+.ar-card.hi { border-top-color: var(--teal); }
+.ar-card.mid { border-top-color: var(--amber, #b06f12); }
+.ar-card.lo { border-top-color: var(--red, #b3261e); }
+.ac-term { font-size: 13px; color: var(--muted); font-weight: 600; }
+.ac-rate { font-size: 38px; font-weight: 800; line-height: 1.1; letter-spacing: -1px; margin-top: 4px; }
+.ac-rate small { font-size: 18px; font-weight: 600; margin-left: 2px; }
+.ar-card.hi .ac-rate { color: var(--teal); }
+.ar-card.mid .ac-rate { color: var(--amber, #b06f12); }
+.ar-card.lo .ac-rate { color: var(--red, #b3261e); }
+.ac-warn { font-size: 15px; }
+.ac-meta { font-size: 11px; color: var(--muted); margin-top: 6px; }
+.ac-cnt { font-size: 12px; color: var(--ink); opacity: .85; margin-top: 3px; }
+.ar-note { font-size: 11px; color: var(--muted); margin-top: 12px; }
+@media (max-width: 640px) {
+  .ar-cards { grid-template-columns: 1fr; }
+}
+.ac-basis { font-size: 11px; color: var(--muted); margin-top: 3px; opacity: .85; }
