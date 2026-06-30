@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import * as XLSX from "xlsx-js-style";
 import JSZip from "jszip";
 import regions from "./regions.json";
+import { routeInput } from "./registry";
 
 const YEARS = Array.from({ length: 12 }, (_, i) => 2026 - i);
 const MONTHS = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0"));
@@ -112,27 +113,46 @@ function styleSheet(ws, rows, kinds) {
   ws["!cols"] = [{ wch: 10 }, { wch: 12 }, { wch: 22 }, { wch: 9 }, { wch: 9 }, { wch: 16 }, { wch: 16 }, { wch: 9 }, { wch: 11 }];
   return ws;
 }
-// 매각통계 위계: 대분류 코드(lclDspslGdsLstUsgCd)로 묶어 단일/세부/소계/전체 구분
-// ⚠ 법원 응답엔 'header' 필드가 없음 → 반드시 대분류 코드로 그룹핑
-const GRP_KEYS = ["lclDspslGdsLstUsgCd", "lclAuctnGdsUsgCd"];
-function grpKey(r) {
-  for (const k of GRP_KEYS) if (r[k] != null && r[k] !== "") return String(r[k]);
-  return r.lclDspslGdsLstUsgNm || "";
+// 매각통계 위계: 대분류 코드로 묶어 단일/세부/소계/전체 구분
+// ⚠ 어떤 필드가 '대분류 코드'인지 응답마다 다를 수 있어, 후보 필드 중
+//   '소계가 홀로 떨어지지 않고 그룹을 정확히 닫는' 필드를 자동 선택한다.
+const GRP_FIELDS = ["lclAuctnGdsUsgCd", "lclDspslGdsLstUsgCd", "mclAuctnGdsUsgCd", "mclDspslGdsLstUsgCd"];
+function segmentBy(rows, keyFn) {
+  const segs = [];
+  for (const r of rows) {
+    const k = keyFn(r);
+    const last = segs[segs.length - 1];
+    if (last && last.k === k) last.rows.push(r);
+    else segs.push({ k, rows: [r] });
+  }
+  return segs;
+}
+// 세그먼트가 올바른 위계인지 위반 점수(0=정상): 소계는 length>1 그룹의 마지막에 1개만
+function segViolation(seg) {
+  const names = seg.rows.map((r) => r.lclDspslGdsLstUsgNm);
+  const subs = names.filter((n) => n === "소계").length;
+  const tot = names.filter((n) => n === "전체").length;
+  if (tot > 0) return seg.rows.length > 1 ? 1 : 0;          // 전체는 단독 행
+  if (seg.rows.length === 1) return subs > 0 ? 1 : 0;        // 소계가 홀로면 위반
+  return subs === 1 && names[names.length - 1] === "소계" ? 0 : 1;
 }
 function groupRows(rows) {
-  const groups = [];
-  for (const r of rows || []) {
-    const k = grpKey(r);
-    const last = groups[groups.length - 1];
-    if (last && last.k === k) last.rows.push(r);
-    else groups.push({ k, rows: [r] });
+  rows = rows || [];
+  let best = null, bestScore = Infinity;
+  for (const f of GRP_FIELDS) {
+    if (!rows.some((r) => r[f] != null && r[f] !== "")) continue;
+    const segs = segmentBy(rows, (r) => String(r[f] ?? ""));
+    const score = segs.reduce((a, s) => a + segViolation(s), 0);
+    if (score < bestScore) { bestScore = score; best = segs; }
+    if (score === 0) break;
   }
+  if (!best) best = segmentBy(rows, (r) => String(r.lclDspslGdsLstUsgNm ?? ""));
   const out = [];
-  for (const g of groups) {
+  for (const g of best) {
     const multi = g.rows.length > 1;
     const leaves = g.rows.map((r) => r.lclDspslGdsLstUsgNm);
     const distinct = [...new Set(leaves)];
-    // 그룹 라벨: 그룹 내 용도명이 같으면 그게 대분류명, 다르면 세부(겸용/소계/전체 제외) 합성
+    // 그룹 라벨: 용도명이 모두 같으면 그게 대분류명, 다르면 세부(겸용/소계/전체 제외) 합성
     const label = distinct.length === 1 ? distinct[0]
       : (leaves.filter((n) => n !== "겸용" && n !== "소계" && n !== "전체").join(",") || distinct[0]);
     for (const r of g.rows) {
@@ -171,9 +191,12 @@ function parseAddress(addr) {
   const a = (addr || "").trim().replace(/\s+/g, " ");
   if (!a) return null;
   const aNS = a.replace(/\s/g, "");
-  // 1) 시도 (광주=시도 vs 경기 광주시 충돌 방지: 문자열 맨앞에서만 시도 인정)
-  let sd = null;
-  for (const [alias, code] of SIDO_ALIAS) { if (a.startsWith(alias)) { sd = code; break; } }
+  // 1) 시도: 가장 먼저 등장하는 별칭(우편번호·앞 토큰이 있어도 인식). 긴 별칭 우선.
+  let sd = null, sdAt = Infinity;
+  for (const [alias, code] of SIDO_ALIAS) {
+    const i = a.indexOf(alias);
+    if (i >= 0 && (i < sdAt || (i === sdAt && alias.length > 2))) { sd = code; sdAt = i; }
+  }
   // 2) 시군구: 해당 시도 목록에서 (공백제거) 부분일치, 긴 이름 우선("수원시 영통구")
   const pick = (list) => {
     const cands = [...(list || [])].sort((x, y) => y.name.length - x.name.length);
@@ -377,7 +400,16 @@ export default function App() {
   }
   function onAddrSearch() {
     setAErr(""); setALoc(null);
-    const p = parseAddress(addr);
+    const raw = addr.trim();
+    if (!raw) { setAErr("주소 또는 등기고유번호를 입력하세요 (예: 서울 강남구 / 1146-1996-072481)."); return; }
+    // 입력 라우팅: 등기고유번호 / 등기부주소 / 도로명 / 지번
+    const routed = routeInput(raw);
+    if (routed.종류 === "등기고유번호") {
+      // 번호→주소는 등본 열람(유료)이 있어야만 가능 → 콜백 미연결 시 안내
+      setAErr(`등기고유번호(${routed.등기고유번호})는 번호만으로 자동 주소조회가 안 됩니다(등본 열람 필요). 주소·등기부 소재지를 입력하거나, 아래에서 직접 선택하세요.`);
+      return;
+    }
+    const p = parseAddress(raw);
     if (!p) { setAErr("주소에서 시군구를 찾지 못했습니다. 아래에서 직접 선택하세요."); return; }
     if (p.ambiguous) { setAErr(`여러 지역(${p.ambiguous.map((h) => h.sdName).join("/")})과 일치합니다. 아래에서 직접 선택하세요.`); return; }
     if (p.needSgg) { setAErr(`${p.sdName} 안에서 구/군을 찾지 못했습니다. 아래에서 직접 선택하세요.`); setASido(p.sdCode); return; }
@@ -527,13 +559,13 @@ export default function App() {
       <section className="panel addr">
         <div className="addr-row">
           <input
-            className="addr-in" value={addr} placeholder="주소 입력 (예: 서울특별시 강남구 테헤란로 152)"
+            className="addr-in" value={addr} placeholder="주소 또는 등기고유번호 입력 (예: 서울 강남구 / 1146-1996-072481)"
             onChange={(e) => setAddr(e.target.value)}
             onKeyDown={(e) => { if (e.key === "Enter") onAddrSearch(); }}
           />
           <button className="go" onClick={onAddrSearch} disabled={aBusy}>{aBusy ? "조회 중…" : "낙찰가율 조회"}</button>
         </div>
-        <div className="addr-hint">도로명·지번 모두 인식 · 통계는 소속 시군구 기준 · 최근 6개월 평균</div>
+        <div className="addr-hint">도로명·지번·등기부 소재지·등기고유번호 인식 · 통계는 소속 시군구 기준 · 6개월/1년/3년 가중평균</div>
 
         {aErr && (
           <div className="addr-fallback">

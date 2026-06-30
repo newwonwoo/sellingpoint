@@ -138,7 +138,7 @@ tr.bad td { background: #fef4f3 !important; }
 .addr-row { display: flex; gap: 10px; }
 .addr-in {
   flex: 1; padding: 13px 14px; font-size: 15px; border-radius: 10px;
-  border: 1px solid var(--line); background: var(--card2, #0e1726); color: var(--ink);
+  border: 1px solid var(--line); background: #ffffff; color: var(--ink);
 }
 .addr-in:focus { outline: none; border-color: var(--teal); box-shadow: 0 0 0 3px rgba(12,107,88,.25); }
 .addr-hint { font-size: 12px; color: var(--muted); }
@@ -146,7 +146,7 @@ tr.bad td { background: #fef4f3 !important; }
 .fb-controls { display: flex; gap: 8px; flex-wrap: wrap; }
 .fb-controls select {
   padding: 10px 12px; border-radius: 9px; border: 1px solid var(--line);
-  background: var(--card2, #0e1726); color: var(--ink); font-size: 14px;
+  background: #ffffff; color: var(--ink); font-size: 14px;
 }
 .addr-result {
   border: 1px solid var(--line); border-radius: 12px; padding: 16px;
@@ -161,7 +161,7 @@ tr.bad td { background: #fef4f3 !important; }
 .ar-use { display: flex; flex-direction: column; gap: 5px; font-size: 12px; color: var(--muted); }
 .ar-use select {
   padding: 11px 13px; border-radius: 9px; border: 1px solid var(--line);
-  background: var(--card2, #0e1726); color: var(--ink); font-size: 15px; min-width: 180px;
+  background: #ffffff; color: var(--ink); font-size: 15px; min-width: 180px;
 }
 .ar-rate { text-align: right; }
 .ar-big { font-size: 46px; font-weight: 800; line-height: 1; letter-spacing: -1px; }
@@ -190,7 +190,7 @@ tr.bad td { background: #fef4f3 !important; }
 .ar-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
 .ar-card {
   border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px;
-  background: var(--card2, #0e1726); border-top: 3px solid var(--muted);
+  background: #ffffff; border-top: 3px solid var(--muted);
 }
 .ar-card.hi { border-top-color: var(--teal); }
 .ar-card.mid { border-top-color: var(--amber, #b06f12); }
@@ -209,3 +209,5 @@ tr.bad td { background: #fef4f3 !important; }
   .ar-cards { grid-template-columns: 1fr; }
 }
 .ac-basis { font-size: 11px; color: var(--muted); margin-top: 3px; opacity: .85; }
+.addr-in::placeholder { color: var(--muted); }
+.ar-card { background: #fff; }
