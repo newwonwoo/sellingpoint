@@ -3,6 +3,7 @@ import * as XLSX from "xlsx-js-style";
 import JSZip from "jszip";
 import regions from "./regions.json";
 import { routeInput } from "./registry";
+import { courtSggCodes, dedupeSggOptions } from "./courtCodes";
 
 const YEARS = Array.from({ length: 12 }, (_, i) => 2026 - i);
 const MONTHS = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0"));
@@ -42,6 +43,26 @@ function toOptions(data) {
       return { code: String(code ?? ""), name: String(name ?? "") };
     })
     .filter((o) => o.code && o.name && o.name !== "전체");
+}
+
+// 법원 시군구 목록: 시도별로 한 번만 받아 캐시한다(엑셀 전국수집에서 시도마다 재요청하지 않도록).
+// 이 목록이 있어야 '금천구=540' 같이 법정동 코드와 어긋난 법원 코드를 찾을 수 있다.
+const sggListCache = new Map();
+function loadCourtSggList(sidoCode) {
+  if (!sidoCode) return Promise.resolve([]);
+  if (sggListCache.has(sidoCode)) return sggListCache.get(sidoCode);
+  const p = (async () => {
+    try {
+      const r = await fetch("/api/court-adong", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ty: "2", sidoCode }),
+      });
+      return toOptions(await r.json());
+    } catch { return []; }
+  })();
+  sggListCache.set(sidoCode, p);
+  p.then((list) => { if (!list.length) sggListCache.delete(sidoCode); }); // 실패는 캐시하지 않음
+  return p;
 }
 const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
 const fmtInt = (v) => num(v).toLocaleString();
@@ -265,21 +286,26 @@ export default function App() {
     setSigungu(""); setSgList(null);
     if (!sido) return;
     let alive = true;
-    (async () => {
-      try {
-        const r = await fetch("/api/court-adong", {
-          method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ ty: "2", sidoCode: sido }),
-        });
-        const data = await r.json();
-        const opts = toOptions(data);
-        if (alive) setSgList(opts.length ? opts : regions.sigungu[sido] || []);
-      } catch { if (alive) setSgList(regions.sigungu[sido] || []); }
-    })();
+    loadCourtSggList(sido).then((opts) => { if (alive) setSgList(opts.length ? opts : null); });
     return () => { alive = false; };
   }, [sido]);
 
-  const sigunguOptions = sgList ?? (sido ? regions.sigungu[sido] || [] : []);
+  // 드롭다운: 법원 목록을 이름 기준으로 합친다(같은 '금천구'가 540·545 두 줄로 뜨던 것 → 한 줄).
+  // 옵션 value는 코드들을 콤마로 이은 문자열이고, 조회 시 전부 조회해 합산한다.
+  // 법원 목록을 못 받으면 regions.json + 법정동 뒤 3자리로 폴백.
+  const sigunguOptions = useMemo(() => {
+    if (sgList) return dedupeSggOptions(sgList);
+    const list = sido ? regions.sigungu[sido] || [] : [];
+    return list.map((g) => {
+      const codes = courtSggCodes(g.name, g.code, null);
+      return { name: g.name, codes, code: codes.join(",") };
+    });
+  }, [sgList, sido]);
+  // 선택된 옵션의 법원 코드 배열 (미선택 = 시도 전체)
+  const sigunguCodes = useMemo(
+    () => (sigungu ? sigunguOptions.find((g) => g.code === sigungu)?.codes || sigungu.split(",") : []),
+    [sigungu, sigunguOptions],
+  );
   const rawRows = useMemo(() => (resp ? findRows(resp) : []), [resp]);
   // 확인된 스키마면 그 컬럼만, 아니면 원본 키 전체(폴백)
   const known = rawRows.length && "lclDspslGdsLstUsgNm" in rawRows[0];
@@ -330,23 +356,26 @@ export default function App() {
     try {
       const r = await fetch("/api/court-stats", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ sidoCode: sido, sigunguCode: sigungu, startYM: `${startY}${startM}`, endYM: `${endY}${endM}` }),
+        body: JSON.stringify({ sidoCode: sido, sigunguCodes, startYM: `${startY}${startM}`, endYM: `${endY}${endM}` }),
       });
       const data = await r.json();
       if (!r.ok) throw new Error([data.error, data.hint].filter(Boolean).join(" — "));
       setResp(data);
       const n = findRows(data).length;
-      setStatus(n ? `완료 · ${n}개 행 (${startY}.${startM} ~ ${endY}.${endM})` : "응답은 받았지만 표 행이 없습니다(아래 원본 확인).");
+      // 코드가 둘 이상이면 합산했다는 사실을 밝힌다(법원 사이트 화면과 숫자가 달라 보일 수 있어서).
+      const used = data?.meta?.sggCodesUsed;
+      const merged = used && used.length > 1 ? ` · 법원코드 ${used.join("+")} 합산` : "";
+      setStatus(n ? `완료 · ${n}개 행 (${startY}.${startM} ~ ${endY}.${endM})${merged}` : "응답은 받았지만 표 행이 없습니다(아래 원본 확인).");
     } catch (e) { setError(String(e.message || e)); setStatus(""); }
     finally { setBusy(false); }
   }
 
   // --- 엑셀 수집 공통 헬퍼 ---
   const periodTag = () => `${startY}${startM}_${endY}${endM}`;
-  async function fetchStatsRows(sdCode, sggCode) {
+  async function fetchStatsRows(sdCode, sggCodes) {
     const r = await fetch("/api/court-stats", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ sidoCode: sdCode, sigunguCode: sggCode, startYM: `${startY}${startM}`, endYM: `${endY}${endM}` }),
+      body: JSON.stringify({ sidoCode: sdCode, sigunguCodes: sggCodes || [], startYM: `${startY}${startM}`, endYM: `${endY}${endM}` }),
     });
     const data = await r.json();
     if (!r.ok) throw new Error(data.error || r.status);
@@ -356,7 +385,7 @@ export default function App() {
   async function resolveSido(code) {
     const cands = code === "42" ? ["42", "51"] : code === "45" ? ["45", "52"] : [code];
     if (cands.length === 1) return code;
-    for (const c of cands) { try { if ((await fetchStatsRows(c, "")).length) return c; } catch {} }
+    for (const c of cands) { try { if ((await fetchStatsRows(c, [])).length) return c; } catch {} }
     return code;
   }
 
@@ -374,12 +403,13 @@ export default function App() {
     setABusy(true); setAErr(""); setAData(null); setAUse(""); setAMsg("");
     try {
       const eff = await resolveSido(loc.sdCode);
-      const sgg = String(loc.sggCode).slice(-3);
+      // 법정동 뒤 3자리를 그대로 쓰면 금천구처럼 0건이 나오는 구가 있어 법원 목록에서 이름으로 찾는다.
+      const sgg = courtSggCodes(loc.sggName, loc.sggCode, await loadCourtSggList(eff));
       const calls = PERIODS.map(async (p) => {
         const { startYM, endYM, label } = rollWindow(p.months);
         const r = await fetch("/api/court-stats", {
           method: "POST", headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ sidoCode: eff, sigunguCode: sgg, startYM, endYM }),
+          body: JSON.stringify({ sidoCode: eff, sigunguCodes: sgg, startYM, endYM }),
         });
         const data = await r.json();
         if (!r.ok) throw new Error([data.error, data.hint].filter(Boolean).join(" — "));
@@ -453,6 +483,7 @@ export default function App() {
   // 한 시도의 구 전체 수집 (rows + kinds 동기 배열)
   async function collectSido(sd, onProg) {
     const eff = await resolveSido(sd.code);
+    const courtList = await loadCourtSggList(eff);
     const list = regions.sigungu[sd.code] || [];
     const targets = list.length ? list : [{ code: "", name: "(전체)" }];
     const rows = [], kinds = []; let fail = 0;
@@ -460,7 +491,7 @@ export default function App() {
       const g = targets[i];
       onProg && onProg(i + 1, targets.length, g.name || "(전체)");
       try {
-        const raw = await fetchStatsRows(eff, g.code ? String(g.code).slice(-3) : "");
+        const raw = await fetchStatsRows(eff, g.code ? courtSggCodes(g.name, g.code, courtList) : []);
         for (const it of groupRows(raw)) { rows.push(mapItem(sd.name, g.name, it)); kinds.push(it.kind); }
       } catch { fail++; }
       await new Promise((res) => setTimeout(res, 120));
@@ -486,7 +517,7 @@ export default function App() {
       setDlMsg(`수집 중 · ${name}`);
       try {
         const eff = await resolveSido(sd.code);
-        const raw = await fetchStatsRows(eff, String(sigungu).slice(-3));
+        const raw = await fetchStatsRows(eff, sigunguCodes);
         for (const it of groupRows(raw)) { rows.push(mapItem(sd.name, name, it)); kinds.push(it.kind); }
       } catch { fail++; }
     } else {
