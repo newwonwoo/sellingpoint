@@ -4,6 +4,8 @@ import JSZip from "jszip";
 import regions from "./regions.json";
 import { routeInput } from "./registry";
 import { courtSggCodes, dedupeSggOptions } from "./courtCodes";
+import { groupRows } from "./statsModel.js";
+import { bucketMonth, categoriesOf, findWindows, monthRange, referenceGrid, shiftYM } from "./backtrack.js";
 
 const YEARS = Array.from({ length: 12 }, (_, i) => 2026 - i);
 const MONTHS = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0"));
@@ -134,56 +136,6 @@ function styleSheet(ws, rows, kinds) {
   ws["!cols"] = [{ wch: 10 }, { wch: 12 }, { wch: 22 }, { wch: 9 }, { wch: 9 }, { wch: 16 }, { wch: 16 }, { wch: 9 }, { wch: 11 }];
   return ws;
 }
-// 매각통계 위계: 대분류 코드로 묶어 단일/세부/소계/전체 구분
-// ⚠ 어떤 필드가 '대분류 코드'인지 응답마다 다를 수 있어, 후보 필드 중
-//   '소계가 홀로 떨어지지 않고 그룹을 정확히 닫는' 필드를 자동 선택한다.
-const GRP_FIELDS = ["lclAuctnGdsUsgCd", "lclDspslGdsLstUsgCd", "mclAuctnGdsUsgCd", "mclDspslGdsLstUsgCd"];
-function segmentBy(rows, keyFn) {
-  const segs = [];
-  for (const r of rows) {
-    const k = keyFn(r);
-    const last = segs[segs.length - 1];
-    if (last && last.k === k) last.rows.push(r);
-    else segs.push({ k, rows: [r] });
-  }
-  return segs;
-}
-// 세그먼트가 올바른 위계인지 위반 점수(0=정상): 소계는 length>1 그룹의 마지막에 1개만
-function segViolation(seg) {
-  const names = seg.rows.map((r) => r.lclDspslGdsLstUsgNm);
-  const subs = names.filter((n) => n === "소계").length;
-  const tot = names.filter((n) => n === "전체").length;
-  if (tot > 0) return seg.rows.length > 1 ? 1 : 0;          // 전체는 단독 행
-  if (seg.rows.length === 1) return subs > 0 ? 1 : 0;        // 소계가 홀로면 위반
-  return subs === 1 && names[names.length - 1] === "소계" ? 0 : 1;
-}
-function groupRows(rows) {
-  rows = rows || [];
-  let best = null, bestScore = Infinity;
-  for (const f of GRP_FIELDS) {
-    if (!rows.some((r) => r[f] != null && r[f] !== "")) continue;
-    const segs = segmentBy(rows, (r) => String(r[f] ?? ""));
-    const score = segs.reduce((a, s) => a + segViolation(s), 0);
-    if (score < bestScore) { bestScore = score; best = segs; }
-    if (score === 0) break;
-  }
-  if (!best) best = segmentBy(rows, (r) => String(r.lclDspslGdsLstUsgNm ?? ""));
-  const out = [];
-  for (const g of best) {
-    const multi = g.rows.length > 1;
-    const leaves = g.rows.map((r) => r.lclDspslGdsLstUsgNm);
-    const distinct = [...new Set(leaves)];
-    // 그룹 라벨: 용도명이 모두 같으면 그게 대분류명, 다르면 세부(겸용/소계/전체 제외) 합성
-    const label = distinct.length === 1 ? distinct[0]
-      : (leaves.filter((n) => n !== "겸용" && n !== "소계" && n !== "전체").join(",") || distinct[0]);
-    for (const r of g.rows) {
-      const name = r.lclDspslGdsLstUsgNm;
-      const kind = name === "전체" ? "total" : name === "소계" ? "subtotal" : (multi ? "detail" : "single");
-      out.push({ r, kind, group: label, leaf: name });
-    }
-  }
-  return out;
-}
 // 행 정합성: 매각건수≤경매건수, 매각율=매각/경매, 매각가율=매각가/감정가
 function checkRow(r) {
   const auctn = num(r.auctnNum), dspsl = num(r.dspslNum);
@@ -194,6 +146,7 @@ function checkRow(r) {
   return cntOk && dOk && aOk;
 }
 const isSubtotal = (name) => name === "소계" || name === "전체";
+const ymLabel = (ym) => `${String(ym).slice(0, 4)}.${String(ym).slice(4)}`;
 
 // ── 2차 MVP: 주소 → 시군구 로컬 파싱 (외부 API 키 불필요) ──
 // 시도 별칭(신·구 명칭 모두) → regions.json 시도코드. 긴 별칭 먼저 매칭.
@@ -282,6 +235,20 @@ export default function App() {
   const [aSido, setASido] = useState("");     // 수동 fallback
   const [aSgg, setASgg] = useState("");
 
+  // ── 낙찰가율 역추적 상태 ──
+  const [btSido, setBtSido] = useState("11");
+  const [btSgg, setBtSgg] = useState("");
+  const [btSgList, setBtSgList] = useState(null);
+  const [btGoal, setBtGoal] = useState("74");
+  const [btTol, setBtTol] = useState("0.5");
+  const [btTarget, setBtTarget] = useState("전체");
+  const [btYears, setBtYears] = useState("3");
+  const [btBusy, setBtBusy] = useState(false);
+  const [btMsg, setBtMsg] = useState("");
+  const [btErr, setBtErr] = useState("");
+  // 수집한 월별 데이터는 들고 있는다 → 용도·목표값·오차를 바꿔도 법원에 다시 묻지 않고 즉시 재계산
+  const [btData, setBtData] = useState(null);   // { monthly, endYM, label }
+
   useEffect(() => {
     setSigungu(""); setSgList(null);
     if (!sido) return;
@@ -306,6 +273,42 @@ export default function App() {
     () => (sigungu ? sigunguOptions.find((g) => g.code === sigungu)?.codes || sigungu.split(",") : []),
     [sigungu, sigunguOptions],
   );
+  // 역추적 섹션의 시군구 목록 (메인 조회와 독립적으로 고를 수 있어야 해서 따로 둔다)
+  useEffect(() => {
+    setBtSgg(""); setBtSgList(null);
+    if (!btSido) return;
+    let alive = true;
+    loadCourtSggList(btSido).then((opts) => { if (alive) setBtSgList(opts.length ? opts : null); });
+    return () => { alive = false; };
+  }, [btSido]);
+  const btSggOptions = useMemo(() => {
+    if (btSgList) return dedupeSggOptions(btSgList);
+    const list = btSido ? regions.sigungu[btSido] || [] : [];
+    return list.map((g) => {
+      const codes = courtSggCodes(g.name, g.code, null);
+      return { name: g.name, codes, code: codes.join(",") };
+    });
+  }, [btSgList, btSido]);
+
+  // 수집 데이터가 있으면 실제 등장한 대분류를 용도 선택지로 쓴다(전국엔 자동차·선박 등도 나온다)
+  const btUseList = useMemo(
+    () => ["전체", ...(btData ? categoriesOf(btData.monthly) : [])],
+    [btData],
+  );
+  const btHits = useMemo(() => {
+    if (!btData) return null;
+    const goal = Number(btGoal);
+    if (!Number.isFinite(goal) || goal <= 0) return null;
+    return findWindows(btData.monthly, goal, { target: btTarget, tolerance: Number(btTol), minSold: 5 });
+  }, [btData, btGoal, btTol, btTarget]);
+  const btGrid = useMemo(() => {
+    if (!btData) return null;
+    return referenceGrid(btData.monthly, {
+      target: btTarget, method: "weighted",
+      ends: [btData.endYM, shiftYM(btData.endYM, -1), shiftYM(btData.endYM, -2)],
+    });
+  }, [btData, btTarget]);
+
   const rawRows = useMemo(() => (resp ? findRows(resp) : []), [resp]);
   // 확인된 스키마면 그 컬럼만, 아니면 원본 키 전체(폴백)
   const known = rawRows.length && "lclDspslGdsLstUsgNm" in rawRows[0];
@@ -556,6 +559,37 @@ export default function App() {
     setDlBusy(false);
   }
 
+  // ── 낙찰가율 역추적 ──
+  // 외부 서비스가 "평균 낙찰가율 74%"만 주고 기간·산식을 안 밝힐 때, 그 값이 나오는
+  // 구간을 거꾸로 찾는다. 월별 통계를 한 번 받아두고 모든 (시작월,종료월) 조합을 로컬 계산.
+  async function runBacktrack() {
+    const goal = Number(btGoal);
+    if (!Number.isFinite(goal) || goal <= 0) { setBtErr("찾을 낙찰가율을 입력하세요 (예: 74)"); return; }
+    setBtBusy(true); setBtErr(""); setBtData(null);
+    try {
+      const codes = btSgg ? (btSggOptions.find((g) => g.code === btSgg)?.codes || btSgg.split(",")) : [];
+      const endYM = `${_lastE.getFullYear()}${_p2(_lastE.getMonth() + 1)}`;  // 지난달까지(이번달 미완성)
+      const months = monthRange(shiftYM(endYM, -(Number(btYears) * 12 - 1)), endYM);
+      const monthly = {};
+      for (let i = 0; i < months.length; i += 12) {          // API가 한 번에 12개월까지 받는다
+        const chunk = months.slice(i, i + 12);
+        setBtMsg(`법원 통계 수집 중 ${Math.min(i + chunk.length, months.length)}/${months.length}개월…`);
+        const r = await fetch("/api/court-stats", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sidoCode: btSido, sigunguCodes: codes, months: chunk }),
+        });
+        const data = await r.json();
+        if (!r.ok) throw new Error([data.error, data.hint].filter(Boolean).join(" — "));
+        for (const [m, rows] of Object.entries(data.monthly || {})) monthly[m] = bucketMonth(rows);
+      }
+      const sggName = btSgg ? btSggOptions.find((g) => g.code === btSgg)?.name : "";
+      const label = `${sidoName(btSido)}${sggName ? ` ${sggName}` : " 전체"}`;
+      setBtData({ monthly, endYM, label });
+      setBtMsg(`${label} · ${months.length}개월 수집 완료 (${ymLabel(months[0])}~${ymLabel(endYM)}) · 용도·목표값은 재조회 없이 바로 바뀝니다`);
+    } catch (e) { setBtErr(String(e.message || e)); setBtMsg(""); }
+    finally { setBtBusy(false); }
+  }
+
   function download() {
     if (!rawRows.length) return;
     let head, lines;
@@ -755,6 +789,100 @@ export default function App() {
       {resp && !rawRows.length && !error && (
         <section className="panel"><div className="status">표 행이 없습니다. 응답 원본:</div>
           <pre className="raw">{JSON.stringify(resp, null, 2).slice(0, 2000)}</pre></section>
+      )}
+
+      <div className="section-div">낙찰가율 역추적 (기간·산식 거꾸로 찾기)</div>
+
+      <section className="panel controls bt">
+        <label><span>시도</span>
+          <select value={btSido} onChange={(e) => setBtSido(e.target.value)}>
+            {regions.sido.map((s) => <option key={s.code} value={s.code}>{s.name}</option>)}
+          </select>
+        </label>
+        <label><span>시군구</span>
+          <select value={btSgg} onChange={(e) => setBtSgg(e.target.value)} disabled={!btSido}>
+            <option value="">전체</option>
+            {btSggOptions.map((g) => <option key={g.code} value={g.code}>{g.name}</option>)}
+          </select>
+        </label>
+        <label><span>대상 용도</span>
+          <select value={btTarget} onChange={(e) => setBtTarget(e.target.value)} disabled={!btData}>
+            {btUseList.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        </label>
+        <label><span>찾을 낙찰가율(%)</span>
+          <input className="bt-num" type="number" step="0.1" value={btGoal}
+            onChange={(e) => setBtGoal(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !btBusy) runBacktrack(); }} />
+        </label>
+        <label><span>허용오차</span>
+          <select value={btTol} onChange={(e) => setBtTol(e.target.value)}>
+            <option value="0.3">±0.3%p</option><option value="0.5">±0.5%p</option><option value="1">±1.0%p</option>
+          </select>
+        </label>
+        <label><span>탐색범위</span>
+          <select value={btYears} onChange={(e) => setBtYears(e.target.value)}>
+            <option value="3">최근 3년</option><option value="5">최근 5년</option><option value="10">최근 10년</option>
+          </select>
+        </label>
+        <button className="go" onClick={runBacktrack} disabled={btBusy}>{btBusy ? "탐색 중…" : "역추적"}</button>
+      </section>
+
+      {(btMsg || btErr) && <div className={`status ${btErr ? "err" : ""}`}>{btErr || btMsg}</div>}
+
+      {btHits && (
+        <section className="panel">
+          <div className="toolbar">
+            <span className={`badge ${btHits.length ? "ok" : "warn"}`}>
+              {btData.label} · {btTarget} · {btGoal}% ±{btTol}%p → {btHits.length}개 구간
+            </span>
+          </div>
+          {btHits.length ? (
+            <div className="tablewrap">
+              <table>
+                <thead><tr>
+                  <th className="left">산식</th><th className="left">기간</th><th>개월</th>
+                  <th>낙찰가율<i>%</i></th><th>매각건수<i>건</i></th><th>감정가<i>억</i></th><th>매각가<i>억</i></th>
+                </tr></thead>
+                <tbody>
+                  {btHits.slice(0, 40).map((h, i) => (
+                    <tr key={i} className={h.natural ? "cat" : ""}>
+                      <td className="left">{h.method === "weighted" ? "금액가중" : "대분류 단순평균"}</td>
+                      <td className="left">{ymLabel(h.start)} ~ {ymLabel(h.end)}{h.natural ? " ★" : ""}</td>
+                      <td className="num">{h.months}</td>
+                      <td className="num">{h.rate.toFixed(1)}</td>
+                      <td className="num">{fmtInt(h.sold)}</td>
+                      <td className="num">{fmtEok(h.aee)}</td>
+                      <td className="num">{fmtEok(h.amt)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {btHits.length > 40 && <p className="foot">일치 구간 {btHits.length}개 중 상위 40개만 표시.</p>}
+              <p className="foot">★ = 3·6·12·18·24·36·60개월 같은 흔히 쓰는 기간. 여러 구간이 걸리면 그것만으로는 기간이 특정되지 않으니, 다른 지역 값이나 매각건수로 교차확인해야 합니다.</p>
+            </div>
+          ) : (
+            <>
+              <div className="status">일치하는 구간이 없습니다. 참고로 실제 값은 이렇습니다:</div>
+              <div className="tablewrap">
+                <table>
+                  <thead><tr><th className="left">종료월</th>{[3, 6, 12, 24, 36].map((L) => <th key={L}>{L}개월</th>)}</tr></thead>
+                  <tbody>
+                    {(btGrid || []).map((row) => (
+                      <tr key={row.end}>
+                        <td className="left">{ymLabel(row.end)}</td>
+                        {row.cells.map((c) => (
+                          <td key={c.months} className="num">{c.rate == null ? "-" : `${c.rate.toFixed(1)}%`}</td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="foot">찾는 값이 이 범위 밖이면 그 서비스는 다른 산식(사건별 단순평균, 시세 대비 등)이나 다른 집계 범위를 쓰는 것입니다.</p>
+            </>
+          )}
+        </section>
       )}
 
       <footer className="foot">출처: 대한민국 법원 법원경매정보 · 매각통계(selectRletCortDspslStats)</footer>

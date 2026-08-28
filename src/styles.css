@@ -211,3 +211,13 @@ tr.bad td { background: #fef4f3 !important; }
 .ac-basis { font-size: 11px; color: var(--muted); margin-top: 3px; opacity: .85; }
 .addr-in::placeholder { color: var(--muted); }
 .ar-card { background: #fff; }
+
+/* ── 낙찰가율 역추적 ── */
+.controls.bt { margin-top: 0; }
+.controls.bt label { flex: 1 1 130px; min-width: 110px; }
+.bt-num {
+  height: 40px; padding: 0 12px; border: 1px solid var(--line); border-radius: 9px;
+  background: #fff; color: var(--ink); font-size: 14px; font-family: var(--mono);
+  font-variant-numeric: tabular-nums; width: 100%; box-sizing: border-box;
+}
+.bt-num:focus { outline: 2px solid var(--teal); outline-offset: 1px; border-color: transparent; }
