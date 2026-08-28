@@ -37,9 +37,22 @@ export default async function handler(req, res) {
       : [String(body.sigunguCode || "").slice(-3)].filter(Boolean);
     const startYM = String(body.startYM || "").replace(/-/g, ""); // YYYYMM
     const endYM = String(body.endYM || "").replace(/-/g, "");
+    // 역추적용: 월 목록을 주면 그 달들을 '각각' 조회해 월별로 돌려준다.
+    // 세션 시드를 한 번만 잡으므로 월마다 따로 호출하는 것보다 왕복이 절반이다.
+    // 함수 실행시간 제한이 있어 한 요청당 12개월로 제한한다(프론트가 나눠서 보낸다).
+    const MAX_MONTHS = 12;
+    const months = Array.isArray(body.months)
+      ? body.months.map((m) => String(m).replace(/-/g, "")).filter((m) => /^\d{6}$/.test(m))
+      : null;
+    if (months && months.length > MAX_MONTHS) {
+      return res.status(400).json({ error: `months는 한 번에 ${MAX_MONTHS}개까지입니다.` });
+    }
 
-    if (!/^\d{6}$/.test(startYM) || !/^\d{6}$/.test(endYM)) {
+    if (!months && (!/^\d{6}$/.test(startYM) || !/^\d{6}$/.test(endYM))) {
       return res.status(400).json({ error: "기간(YYYY-MM)을 확인해주세요." });
+    }
+    if (months && !months.length) {
+      return res.status(400).json({ error: "months가 비었습니다." });
     }
 
     // 1) 세션 시드 — 매각통계 화면을 먼저 열어 쿠키 확보
@@ -48,15 +61,15 @@ export default async function handler(req, res) {
     const cookie = setCookies.map((c) => c.split(";")[0]).join("; ");
 
     // 2) 매각통계 요청 (캡처된 본문 구조 그대로). 코드가 여러 개면 같은 세션으로 순차 조회.
-    const fetchOne = async (sggCd) => {
+    const fetchOne = async (sggCd, from = startYM, to = endYM) => {
       const payload = {
         dma_search: {
           searchType: "02",   // 02 = 소재지(지역) 기준 / 01 = 법원 기준
           cortOfcCd: "",      // 소재지 모드에서는 미사용
           adongSdCd: sidoCode, // 시도 2자리
           adongSggCd: sggCd,   // 시군구 (빈값=전체)
-          startDate: startYM,  // YYYYMM
-          endDate: endYM,
+          startDate: from,     // YYYYMM
+          endDate: to,
         },
       };
       const r = await fetch(BASE + STATS_PATH, {
@@ -76,6 +89,25 @@ export default async function handler(req, res) {
     };
 
     const codes = sigunguCodes.length ? sigunguCodes : [""]; // 빈 배열 = 시도 전체
+
+    // 월별 모드 — 각 달을 조회해 { monthly: { "202601": [행...] } } 로 돌려준다.
+    if (months) {
+      const monthly = {};
+      for (const m of months) {
+        const perCode = [];
+        for (const c of codes) {
+          const { status, text } = await fetchOne(c, m, m);
+          if (status !== 200) {
+            return res.status(502).json({ error: `법원 서버 응답 ${status} (${m})`, sample: text.slice(0, 200) });
+          }
+          try { perCode.push(pickStatRows(JSON.parse(text))); }
+          catch { return res.status(502).json({ error: `응답이 JSON이 아닙니다 (${m}).`, sample: text.slice(0, 200) }); }
+        }
+        monthly[m] = perCode.length > 1 ? mergeStatRows(perCode) : (perCode[0] || []);
+      }
+      return res.status(200).json({ status: 200, message: "정상", monthly });
+    }
+
     const results = [];
     for (const c of codes) {
       const { status, text } = await fetchOne(c);
