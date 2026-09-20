@@ -205,6 +205,8 @@ function opposability(moveIn, seniorDate) {
   if (!a || !b) return { known: false };
   return { known: true, assume: a < b, moveIn: a, senior: b };
 }
+// 조세채권 성격의 이해관계인 — 당해세는 근저당보다 먼저 배당된다.
+const TAX_PARTY = new Set(["교부권자", "압류권자"]);
 const ymdLabel = (v) => { const s = String(v || ""); return s.length === 8 ? `${s.slice(0,4)}.${s.slice(4,6)}.${s.slice(6)}` : s; };
 
 // ── 2차 MVP: 주소 → 시군구 로컬 파싱 (외부 API 키 불필요) ──
@@ -848,6 +850,45 @@ export default function App() {
                 {` · 매물 ${cData.lots.length}건 / 목적물 ${cData.objectCount}건`}
               </div>
             </div>
+
+            {/* 이해관계인 — 권리 구조 */}
+            {cData.caseInfo?.partyCount > 0 && (
+              <div className="parties">
+                <div className="pt-head">이해관계인 {cData.caseInfo.partyCount}명</div>
+                <div className="pt-chips">
+                  {cData.caseInfo.parties.map((p) => (
+                    <span key={p.type} className={`pt-chip${TAX_PARTY.has(p.type) ? " tax" : ""}`}>
+                      {p.type} <b>{p.count}</b>
+                    </span>
+                  ))}
+                </div>
+                {cData.caseInfo.parties.some((p) => TAX_PARTY.has(p.type)) && (
+                  <div className="pt-warn">
+                    교부권자·압류권자는 조세채권입니다. 당해세는 근저당보다 먼저 배당돼 실익을 직접 깎습니다
+                    — 금액은 법원이 공개하지 않으니 배당요구 내역을 따로 확인하세요.
+                  </div>
+                )}
+                {cData.caseInfo.relatedCases.length > 0 && (
+                  <div className="pt-rel">
+                    관련사건 {cData.caseInfo.relatedCases.map((r) => `${r.court} ${r.caseNo}${r.kind ? ` (${r.kind})` : ""}`).join(" · ")}
+                  </div>
+                )}
+                {cData.caseInfo.relatedCases.some((r) => r.insolvency) && (
+                  <div className="pt-warn">
+                    채무자에게 회생·파산 사건이 걸려 있습니다. 절차가 지연되거나 경매가 중지될 수 있습니다.
+                  </div>
+                )}
+                {(cData.caseInfo.appealed || cData.caseInfo.suspended) && (
+                  <div className="pt-warn">
+                    {cData.caseInfo.appealed ? "항고됨" : ""}
+                    {cData.caseInfo.appealed && cData.caseInfo.suspended ? " / " : ""}
+                    {cData.caseInfo.suspended ? "집행정지" : ""}
+                    {cData.caseInfo.suspendReason ? ` — ${cData.caseInfo.suspendReason}` : ""} · 매각이 지연됩니다.
+                  </div>
+                )}
+                <div className="pt-note">※ 이름은 법원이 마스킹해서 제공합니다(안OO). 구성과 인원만 확인할 수 있습니다.</div>
+              </div>
+            )}
 
             {/* 사건 정보 — 매물 공통 */}
             {cData.lots.find((l) => l.caseName) && (

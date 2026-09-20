@@ -14,6 +14,7 @@ const BASE = "https://www.courtauction.go.kr";
 const SEARCH_PATH = "/pgj/pgjsearch/searchControllerMain.on";
 const DETAIL_PATH = "/pgj/pgj15B/selectAuctnCsSrchRslt.on";   // 사건상세 (매각물건명세서 항목 포함)
 const SURVEY_PATH = "/pgj/pgj15B/selectCurstExmndc.on";       // 현황조사서 (임차인 전입일·점유관계)
+const PARTY_PATH  = "/pgj/pgj15A/selectAuctnCsSrchRslt.on";   // 사건내역 (이해관계인·관련사건·항고)
 const SEED_PATH = "/pgj/index.on?w2xPath=/pgj/ui/pgj100/PGJ151F00.xml";
 
 // 검색 본문 템플릿(필드 ~60개). 부분만 보내면 서버가 거절하므로 전체를 보낸다.
@@ -236,6 +237,57 @@ async function fetchSurvey(cookie, csNo, courtCode) {
   } catch { return null; }
 }
 
+// 사건내역 — 이해관계인 구성과 관련사건. 권리 구조를 한눈에 보여준다.
+//   dlt_rletCsIntrpsLst : 채권자·채무자겸소유자·임차인·가압류권자·압류권자·교부권자·배당요구권자
+//     ⚠ 이름은 법원이 마스킹해서 준다("안OO"). 사람 특정은 안 되고 구성·인원만 쓴다.
+//     교부권자·압류권자는 조세채권이라 최우선 배당으로 실익을 직접 깎는다.
+//   dlt_rletReltCsLst   : 관련사건. 회생법원 사건이 걸려 있으면 절차가 지연·중지될 수 있다.
+//   rletApalYn "Y"      : 항고됨 (매각 지연)
+//   auctnSuspStatCd     : 경매정지상태코드. 01·02 만 '집행정지'다(화면 로직 확인).
+const SUSPENDED = new Set(["01", "02"]);
+async function fetchParties(cookie, csNo, courtCode) {
+  try {
+    const r = await fetch(BASE + PARTY_PATH, {
+      method: "POST",
+      headers: {
+        ...browserHeaders(),
+        "Content-Type": "application/json;charset=UTF-8",
+        Referer: BASE + "/pgj/index.on?w2xPath=/pgj/ui/pgj100/PGJ15AF01.xml",
+        "SC-Userid": "SYSTEM",
+        "SC-Pgmid": "PGJ15AF01",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        dma_srchCsDtlInf: { csNo, cortOfcCd: courtCode, pgmId: "PGJ15AF01", srchInfo: {} },
+      }),
+    });
+    if (r.status !== 200) return null;
+    const d = (await r.json())?.data;
+    if (!d) return null;
+    const b = d.dma_csBasInf || {};
+    const groups = new Map();
+    for (const p of d.dlt_rletCsIntrpsLst || []) {
+      const t = p.auctnIntrpsDvsNm || "기타";
+      if (!groups.has(t)) groups.set(t, []);
+      groups.get(t).push(p.intrpsNm || "");
+    }
+    return {
+      parties: [...groups.entries()].map(([type, names]) => ({ type, count: names.length, names })),
+      partyCount: (d.dlt_rletCsIntrpsLst || []).length,
+      relatedCases: (d.dlt_rletReltCsLst || []).map((x) => ({
+        court: x.cortOfcNm || "",
+        caseNo: x.userReltCsNo || "",
+        kind: x.reltCsDvsNm || "",
+        // 회생·파산이면 절차가 멈출 수 있어 따로 표시한다
+        insolvency: /회생|파산/.test(`${x.cortOfcNm || ""}${x.userReltCsNo || ""}`),
+      })),
+      appealed: b.rletApalYn === "Y",
+      suspended: SUSPENDED.has(String(b.auctnSuspStatCd || "")),
+      suspendReason: b.csProgSuspRsn || "",
+    };
+  } catch { return null; }
+}
+
 export default async function handler(req, res) {
   try {
     const raw = req.method === "POST" ? req.body : req.query;
@@ -295,8 +347,10 @@ export default async function handler(req, res) {
     const head = uniq[0] || {};
     const lots = groupByLot(uniq);
 
-    // 현황조사서는 사건 단위라 한 번만 부른다.
-    const survey = await fetchSurvey(cookie, csNo, head.boCd || lots[0]?.courtCode);
+    // 현황조사서·사건내역은 사건 단위라 한 번만 부른다.
+    const courtCode = head.boCd || lots[0]?.courtCode;
+    const survey = await fetchSurvey(cookie, csNo, courtCode);
+    const caseInfo = await fetchParties(cookie, csNo, courtCode);
 
     // 매물마다 사건상세를 붙인다(선순위·청구금액·명세서 비고). 실패해도 기본 정보는 살린다.
     for (const lot of lots) {
@@ -316,6 +370,7 @@ export default async function handler(req, res) {
       tel: head.tel || "",
       objectCount: uniq.length,
       survey,
+      caseInfo,
       lots,
     });
   } catch (e) {

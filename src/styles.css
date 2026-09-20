@@ -316,3 +316,14 @@ tr.bad td { background: #fef4f3 !important; }
 .tn-none { font-size: 12.5px; color: var(--muted); }
 .tn-warn { margin-top: 8px; padding: 8px 11px; border-radius: 7px; background: #fdf3f2; border: 1px solid #f0c9c6; color: var(--red); font-size: 12.5px; }
 .tn-note { margin-top: 7px; font-size: 12px; color: #3b4759; line-height: 1.55; }
+
+/* 이해관계인 */
+.parties { margin-top: 10px; padding: 11px 14px; background: #fff; border: 1px solid var(--line); border-radius: 9px; }
+.pt-head { font-size: 11.5px; font-weight: 700; color: var(--muted); margin-bottom: 8px; }
+.pt-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.pt-chip { display: inline-block; padding: 4px 11px; border-radius: 999px; font-size: 12.5px; background: #f1f5f9; border: 1px solid var(--line); color: #3b4759; }
+.pt-chip b { font-family: var(--mono); margin-left: 3px; }
+.pt-chip.tax { background: #fffbeb; border-color: #fde68a; color: #8A5200; }
+.pt-warn { margin-top: 8px; padding: 8px 11px; border-radius: 7px; background: #fffbeb; border: 1px solid #fde68a; color: #8A5200; font-size: 12.5px; }
+.pt-rel { margin-top: 8px; font-size: 12.5px; color: #3b4759; }
+.pt-note { margin-top: 7px; font-size: 11.5px; color: var(--muted); }
