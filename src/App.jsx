@@ -160,6 +160,12 @@ const TABS = [
   { key: "batch", label: "엑셀 일괄분석" },
   { key: "tools", label: "역추적(진단)" },
 ];
+const TAB_SUB = {
+  stats: "소재지·기간을 고르면 법원 매각통계의 용도별 매각가율(=낙찰가율)을 가져옵니다.",
+  case: "사건번호를 넣으면 그 재산의 감정평가액·최선순위·인수권리를 법원에서 가져와 실익을 판정합니다.",
+  batch: "사건번호가 적힌 엑셀을 올리면 사건마다 조회해 매물별로 정리한 엑셀을 내려드립니다.",
+  tools: "기간·산식이 안 밝혀진 평균 낙찰가율 값이 어느 구간에서 나오는지 거꾸로 찾습니다.",
+};
 const initialTab = () => {
   if (typeof window === "undefined") return "stats";
   const h = String(window.location.hash || "").replace(/^#\/?/, "");
@@ -338,6 +344,19 @@ export default function App() {
     setCCalc((prev) => ({ ...prev, [lotNo]: { ...(prev[lotNo] || {}), [field]: v } }));
   // 임차인을 매물별로 가른 결과(사건 단위 현황조사서 → 매물별). cData 가 바뀔 때만 다시 계산.
   const tenantScopes = useMemo(() => (cData ? scopeTenants(cData) : []), [cData]);
+  // 매물이 여럿일 때 같은 경고가 매물 카드마다 반복되던 것을 사건 단위로 올린다.
+  // (매물 3건짜리 사건에서 "명세서 미공개"·"특수조건 있음"이 똑같이 세 번 떴다.)
+  // 매물마다 다르면 올리지 않고 그대로 카드에 둔다 — 합치면 어느 매물 얘긴지 잃는다.
+  const caseWide = useMemo(() => {
+    const lots = cData?.lots || [];
+    if (lots.length < 2) return {};
+    const allUnready = lots.every((l) => l.detailReady === false);
+    const conds = [...new Set(lots.map((l) => l.specialCond || ""))];
+    return {
+      unready: allUnready,
+      specialCond: conds.length === 1 && conds[0] ? conds[0] : null,
+    };
+  }, [cData]);
 
   // ── 엑셀 일괄분석 상태 ──
   // bRows 는 '접힌 결과'(칼럼 배열)만 들고 있다. 조회 응답 원본은 한 건씩 버린다.
@@ -752,6 +771,9 @@ export default function App() {
           setBProg({ done, total: items.length, fail });
         }
       };
+      // ⚠ 진행률을 0으로 먼저 띄운다. 첫 건이 끝나야 setBProg 가 불리므로, 이게 없으면
+      //   시작하고 몇 초~십몇 초 동안 막대가 아예 안 보여 멈춘 것처럼 보인다(실제로 그랬다).
+      setBProg({ done: 0, total: items.length, fail: 0 });
       setBMsg(`${items.length}건 조회 중…`);
       await Promise.all(Array.from({ length: BATCH_CONCURRENCY }, worker));
 
@@ -836,7 +858,9 @@ export default function App() {
       <header className="head">
         <div className="kicker">채권관리 · 실익분석</div>
         <h1>법원경매 낙찰가율 조회</h1>
-        <p className="sub">소재지·기간을 고르면 법원 매각통계의 용도별 매각가율(=낙찰가율)을 가져옵니다.</p>
+        {/* 탭이 셋이 되면서 설명 한 줄이 첫 탭 얘기만 하고 있었다(사건번호·엑셀 탭에서도
+            "소재지·기간을 고르면…"이 떠 있었다). 제목은 앱 이름이라 그대로 두고 설명만 바꾼다. */}
+        <p className="sub">{TAB_SUB[tab] || TAB_SUB.stats}</p>
       </header>
       <nav className="tabs">
         {TABS.filter((t) => t.key !== "tools" || showTools).map((t) => (
@@ -937,6 +961,17 @@ export default function App() {
                 같은 사건번호가 <b>여러 법원</b>에 있습니다 ({cData.court}). 사건번호의 연도·일련번호는 법원별로 따로 돌아가므로
                 아래 매물에 다른 법원 사건이 섞여 있습니다 — 법원을 확인하고 해당 매물만 보세요.
               </div>
+            )}
+            {/* 매물 전체에 똑같이 해당하는 경고는 여기서 한 번만 말한다(카드에서는 생략된다) */}
+            {caseWide.unready && (
+              <div className="lot-warn">
+                매각물건명세서가 <b>아직 공개되지 않았습니다</b> (매물 {cData.lots.length}건 전부) — 선순위 설정일자·인수권리·청구금액을
+                가져올 수 없습니다. 명세서는 매각기일이 가까워야 공개되므로
+                {cData.lots[0]?.saleDate ? ` (기일 ${ymdLabel(cData.lots[0].saleDate)})` : ""} 기일 임박 후 다시 조회하세요.
+              </div>
+            )}
+            {caseWide.specialCond && (
+              <div className="lot-warn">⚠ 특수조건 있음 (코드 {caseWide.specialCond}) — 매물 {cData.lots.length}건 전부. 매각물건명세서 확인 필요</div>
             )}
 
             {cData.appraisal && (
@@ -1053,7 +1088,7 @@ export default function App() {
                     {vsMin != null && lot.rate ? ` · 최저가 대비 ${vsMin >= 0 ? "+" : ""}${vsMin.toFixed(0)}%` : ""}
                   </div>
 
-                  {lot.detailReady === false && (
+                  {lot.detailReady === false && !caseWide.unready && (
                     <div className="lot-warn">
                       매각물건명세서가 아직 공개되지 않았습니다 — 선순위 설정일자·인수권리·청구금액을 가져올 수 없습니다.
                       명세서는 매각기일이 가까워야 공개되므로{lot.saleDate ? ` (기일 ${ymdLabel(lot.saleDate)})` : ""} 기일 임박 후 다시 조회하세요.
@@ -1225,7 +1260,7 @@ export default function App() {
                   )}
                   {lot.usageMix?.length > 1 && <div className="lot-warn">용도가 섞여 있습니다 — {lot.usageMix.join(", ")}. 대표 용도로 계산했습니다.</div>}
                   {lot.failCount >= 3 && <div className="lot-warn">⚠ 유찰 {lot.failCount}회 — 평균 낙찰가율로는 예측이 맞지 않습니다. 유찰이 반복되는 물건은 별도 사유(유치권·대항력 임차인 등)를 확인하세요.</div>}
-                  {lot.specialCond && <div className="lot-warn">⚠ 특수조건 있음 (코드 {lot.specialCond}) — 매각물건명세서 확인 필요</div>}
+                  {lot.specialCond && !caseWide.specialCond && <div className="lot-warn">⚠ 특수조건 있음 (코드 {lot.specialCond}) — 매각물건명세서 확인 필요</div>}
                 </div>
               );
             })}
@@ -1263,7 +1298,7 @@ export default function App() {
             {bBusy ? "분석 중…" : "일괄 분석"}
           </button>
           {bBusy && (
-            <button className="csv" onClick={() => { bCancel.current.stop = true; setBMsg("중지하는 중… 지금까지 받은 건까지 저장합니다"); }}>
+            <button className="bx-stop" onClick={() => { bCancel.current.stop = true; setBMsg("중지하는 중… 지금까지 받은 건까지 저장합니다"); }}>
               중지
             </button>
           )}
@@ -1276,18 +1311,21 @@ export default function App() {
 
         {bErr && <div className="status err">{bErr}</div>}
 
-        {bProg && (
+        {/* 진행 막대는 도는 동안만. 끝나면 아래 상태줄이 같은 내용을 더 자세히 말한다
+            (둘 다 두면 "4 / 4 사건 · 실패 1"과 "완료 · 사건 4건…"이 나란히 떠 중복이다). */}
+        {bProg && bBusy && (
           <div className="bx-prog">
             <div className="bx-bar"><i style={{ width: `${Math.round(bProg.done / bProg.total * 100)}%` }} /></div>
             <div className="bx-prog-t">
               {bProg.done} / {bProg.total} 사건
-              {bProg.fail ? ` · 실패 ${bProg.fail}` : ""}
-              {bBusy ? " · 건당 3~8초 걸립니다" : ""}
+              {bProg.fail ? <b className="bx-fail"> · 실패 {bProg.fail}</b> : null}
+              {" · 건당 3~8초 걸립니다"}
             </div>
           </div>
         )}
 
-        {bMsg && <div className="status">{bMsg}</div>}
+        {/* 실패가 있으면 회색 상태줄에 묻히면 안 된다 — 그 건은 사람이 따로 봐야 한다 */}
+        {bMsg && <div className={`status${!bBusy && bProg?.fail ? " warn" : ""}`}>{bMsg}</div>}
 
         {bRows && !bBusy && (
           <div className="bx-done">
@@ -1296,10 +1334,11 @@ export default function App() {
           </div>
         )}
 
-        <div className="bx-cols">
-          <div className="bx-cols-t">결과 칼럼 {OUT_COLS.length}개</div>
+        {/* 칼럼 37개를 늘 펼쳐두면 화면 절반이 칼럼 이름이 된다(모바일에선 더하다). 접어둔다. */}
+        <details className="bx-cols">
+          <summary>결과 칼럼 {OUT_COLS.length}개 보기</summary>
           <div className="bx-cols-l">{OUT_COLS.map((c) => <span key={c.label}>{c.label}</span>)}</div>
-        </div>
+        </details>
 
         <div className="bx-warn">
           <b>계산에 들어가지 않는 값</b> — 선순위채권과 집행비용은 법원이 공개하지 않습니다.

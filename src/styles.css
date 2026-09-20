@@ -258,12 +258,17 @@ tr.bad td { background: #fef4f3 !important; }
 .lr-objs { margin: 6px 0 0; padding-left: 18px; color: #3b4759; line-height: 1.7; }
 
 /* 상단 탭 */
-.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 4px 0 16px; }
+/* ⚠ 탭이 3개가 되면서 좁은 화면(390px)에서 라벨이 "낙찰가율 조 / 회" 로 잘렸다.
+   줄바꿈을 막고, 그래도 안 들어가면 탭 줄 자체가 가로로 밀리게 둔다. */
+.tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); margin: 4px 0 16px; overflow-x: auto; scrollbar-width: none; }
+.tabs::-webkit-scrollbar { display: none; }
 .tabs button {
   appearance: none; border: 0; background: none; cursor: pointer;
   padding: 9px 16px; font-size: 14px; font-weight: 600; color: var(--muted);
   border-bottom: 2px solid transparent; margin-bottom: -1px; font-family: inherit;
+  white-space: nowrap; flex: 0 0 auto;
 }
+@media (max-width: 460px) { .tabs button { padding: 9px 10px; font-size: 13px; } }
 .tabs button:hover { color: var(--ink); }
 .tabs button.on { color: var(--teal); border-bottom-color: var(--teal); }
 
@@ -330,7 +335,9 @@ tr.bad td { background: #fef4f3 !important; }
 
 /* 경매신청자 · 감정평가 */
 .pt-applicant { font-size: 13px; margin-bottom: 8px; color: var(--ink); }
-.pt-applicant b { font-family: var(--mono); }
+/* ⚠ 마스킹 이름은 대문자 O다("이OOO OOO..."). mono 폰트로 찍으면 0(숫자)처럼 보여
+   이름이 아니라 코드값으로 읽힌다. 이름은 본문 폰트로 둔다. */
+.pt-applicant b { font-family: var(--sans); }
 .pt-hint { color: var(--muted); font-size: 11.5px; }
 .appraisal { margin-top: 10px; padding: 10px 14px; background: #fff; border: 1px solid var(--line); border-radius: 9px; font-size: 12.5px; color: #3b4759; }
 .ap-label { display: inline-block; font-size: 11px; font-weight: 700; color: var(--muted); margin-right: 8px; }
@@ -354,10 +361,24 @@ tr.bad td { background: #fef4f3 !important; }
 .bx-bar { height: 8px; border-radius: 999px; background: #e8eef5; overflow: hidden; }
 .bx-bar i { display: block; height: 100%; background: #0C6B58; transition: width .25s ease; }
 .bx-prog-t { margin-top: 6px; font-size: 12px; color: var(--muted); font-family: var(--mono); }
+.bx-fail { color: #8E1B16; }
+/* 중지는 되돌릴 수 없는 동작이라 '실행' 버튼과 같은 초록으로 두면 안 된다 */
+.bx-stop {
+  flex: 0 0 auto; padding: 0 18px; min-height: 40px; cursor: pointer; font-family: inherit;
+  font-size: 13.5px; font-weight: 600; color: #8E1B16;
+  background: #fff; border: 1px solid #e3b5b2; border-radius: 8px;
+}
+.bx-stop:hover { background: #fdf3f2; }
 .bx-done { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .bx-done span { font-size: 12.5px; color: var(--muted); }
-.bx-cols { margin-top: 14px; padding: 11px 14px; background: #fff; border: 1px solid var(--line); border-radius: 9px; }
-.bx-cols-t { font-size: 11.5px; font-weight: 700; color: var(--muted); margin-bottom: 8px; }
+.bx-cols { margin-top: 14px; padding: 9px 14px; background: #fff; border: 1px solid var(--line); border-radius: 9px; }
+.bx-cols > summary { cursor: pointer; font-size: 11.5px; font-weight: 700; color: var(--muted); }
+.bx-cols[open] > summary { margin-bottom: 9px; }
 .bx-cols-l { display: flex; flex-wrap: wrap; gap: 5px; }
 .bx-cols-l span { padding: 3px 9px; border-radius: 999px; background: #f1f5f9; border: 1px solid var(--line); font-size: 11.5px; color: #3b4759; }
 .bx-warn { margin-top: 12px; padding: 10px 13px; border-radius: 8px; background: #fffbeb; border: 1px solid #fde68a; color: #8A5200; font-size: 12.5px; line-height: 1.55; }
+.status.warn { color: #8A5200; border-color: #fde68a; background: #fffbeb; font-family: var(--sans); }
+@media (max-width: 640px) {
+  .bx-row .go, .bx-stop { flex: 1 1 100%; }
+  .bx-steps span { flex: 1 1 100%; }
+}
