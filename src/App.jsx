@@ -4,7 +4,7 @@ import JSZip from "jszip";
 import regions from "./regions.json";
 import { routeInput } from "./registry";
 import { courtSggCodes, dedupeSggOptions } from "./courtCodes";
-import { groupRows } from "./statsModel.js";
+import { groupRows, matchUsageRow } from "./statsModel.js";
 import { bucketMonth, categoriesOf, findWindows, monthRange, referenceGrid, shiftYM } from "./backtrack.js";
 
 const YEARS = Array.from({ length: 12 }, (_, i) => 2026 - i);
@@ -234,6 +234,12 @@ export default function App() {
   const [aMsg, setAMsg] = useState("");
   const [aSido, setASido] = useState("");     // 수동 fallback
   const [aSgg, setASgg] = useState("");
+
+  // ── 사건번호 실익 미리보기 상태 ──
+  const [caseNo, setCaseNo] = useState("");
+  const [cBusy, setCBusy] = useState(false);
+  const [cErr, setCErr] = useState("");
+  const [cData, setCData] = useState(null);
 
   // ── 낙찰가율 역추적 상태 ──
   const [btSido, setBtSido] = useState("11");
@@ -559,6 +565,49 @@ export default function App() {
     setDlBusy(false);
   }
 
+  // ── 사건번호 실익 미리보기 ──
+  // 사건번호 하나로 그 재산의 감정가를 법원에서 받고, 그 시군구·용도 낙찰가율을 곱해
+  // 예상낙찰가를 낸다. 시세 API가 없어도 되는 이유: 감정가를 법원이 이미 매겨놨다.
+  async function runCaseLookup() {
+    const no = caseNo.trim();
+    if (!no) { setCErr("사건번호를 입력하세요 (예: 2024타경115858)"); return; }
+    setCBusy(true); setCErr(""); setCData(null);
+    try {
+      const r = await fetch("/api/court-case", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ caseNo: no }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || `조회 실패 (${r.status})`);
+      if (!data.lots?.length) {
+        throw new Error("이 사건의 물건을 찾지 못했습니다. 사건번호를 확인해주세요. (기일이 취소·변경된 사건은 조회되지 않는 경우가 있습니다)");
+      }
+      // 낙찰가율은 '최근 1년'(지난달 기준 12개월)으로 고정
+      const endYM = `${_lastE.getFullYear()}${_p2(_lastE.getMonth() + 1)}`;
+      const startYM = shiftYM(endYM, -11);
+      const lots = [];
+      for (const lot of data.lots) {
+        let rate = 0, matched = "-", exact = false;
+        try {
+          const list = await loadCourtSggList(lot.sidoCode);
+          const codes = courtSggCodes(lot.sigungu, lot.sigunguCode, list);
+          const rs = await fetch("/api/court-stats", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sidoCode: lot.sidoCode, sigunguCodes: codes, startYM, endYM }),
+          });
+          const sd = await rs.json();
+          if (rs.ok) {
+            const m = matchUsageRow(findRows(sd), lot.usage);
+            rate = num(m.row?.dspslAmtRate); matched = m.matched; exact = m.exact;
+          }
+        } catch { /* 낙찰가율만 실패해도 감정가·최저가는 보여준다 */ }
+        lots.push({ ...lot, rate, matched, exact, expected: lot.appraisal * rate / 100 });
+      }
+      setCData({ ...data, lots, period: `${ymLabel(startYM)}~${ymLabel(endYM)}` });
+    } catch (e) { setCErr(String(e.message || e)); }
+    finally { setCBusy(false); }
+  }
+
   // ── 낙찰가율 역추적 ──
   // 외부 서비스가 "평균 낙찰가율 74%"만 주고 기간·산식을 안 밝힐 때, 그 값이 나오는
   // 구간을 거꾸로 찾는다. 월별 통계를 한 번 받아두고 모든 (시작월,종료월) 조합을 로컬 계산.
@@ -672,6 +721,76 @@ export default function App() {
               ))}
             </div>
             <div className="ar-note">※ 매각가율 = 구간 매각가합 ÷ 감정가합 × 100 (기간 가중평균) · 최소단위 시군구 · 이번달 제외</div>
+          </div>
+        )}
+      </section>
+
+      <div className="section-div">사건번호로 실익 미리보기</div>
+
+      <section className="panel addr">
+        <div className="addr-row">
+          <input
+            className="addr-in" value={caseNo} placeholder="사건번호 입력 (예: 2024타경115858)"
+            onChange={(e) => setCaseNo(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !cBusy) runCaseLookup(); }}
+          />
+          <button className="go" onClick={runCaseLookup} disabled={cBusy}>{cBusy ? "조회 중…" : "실익 조회"}</button>
+        </div>
+        <div className="addr-hint">법원 감정가 × 그 시군구·용도 낙찰가율(최근 1년) = 예상낙찰가 · 감정가는 법원이 매긴 값이라 시세 추정이 필요 없습니다</div>
+
+        {cErr && <div className="status err">{cErr}</div>}
+
+        {cData && (
+          <div className="addr-result">
+            <div className="ar-head">
+              <div className="ar-loc">
+                {cData.caseNo} · {cData.court} {cData.dept}
+                {cData.tel ? ` · ${cData.tel}` : ""}
+                {` · 매물 ${cData.lots.length}건 / 목적물 ${cData.objectCount}건`}
+              </div>
+            </div>
+
+            {cData.lots.map((lot) => {
+              const o = lot.objects[0] || {};
+              const band = lot.rate >= 100 ? "hi" : lot.rate >= 80 ? "mid" : lot.rate > 0 ? "lo" : "na";
+              const vsMin = lot.minPrice ? (lot.expected / lot.minPrice - 1) * 100 : null;
+              return (
+                <div key={lot.lotNo} className={`lot ${band}`}>
+                  <div className="lot-addr">
+                    {cData.lots.length > 1 && <b>매물 {lot.lotNo} · </b>}
+                    {lot.sido} {lot.sigungu} {lot.dong} {o.jibun} {o.building} {o.unit}
+                    {lot.objects.length > 1 && <span className="lot-more"> 외 {lot.objects.length - 1}건</span>}
+                  </div>
+                  <div className="lot-meta">
+                    {lot.usage} · {fmtInt(lot.areaSum)}㎡ · 유찰 {lot.failCount}회
+                    {lot.saleDate ? ` · 매각기일 ${lot.saleDate.slice(0, 4)}.${lot.saleDate.slice(4, 6)}.${lot.saleDate.slice(6)}` : ""}
+                  </div>
+                  <div className="lot-nums">
+                    <div><span>감정가</span><b>{fmtEok(lot.appraisal)}억</b></div>
+                    <div><span>최저가</span><b>{fmtEok(lot.minPrice)}억</b></div>
+                    <div><span>낙찰가율</span><b>{lot.rate ? `${lot.rate.toFixed(1)}%` : "-"}</b></div>
+                    <div className="hero"><span>예상낙찰가</span><b>{lot.rate ? `${fmtEok(lot.expected)}억` : "-"}</b></div>
+                  </div>
+                  <div className="lot-basis">
+                    {lot.rate
+                      ? `${lot.sigungu} · ${lot.matched}${lot.exact ? "" : " (용도 매칭 실패 → 전체 적용)"} · ${cData.period} 기준`
+                      : "낙찰가율을 가져오지 못했습니다"}
+                    {vsMin != null && lot.rate ? ` · 최저가 대비 ${vsMin >= 0 ? "+" : ""}${vsMin.toFixed(0)}%` : ""}
+                  </div>
+                  {lot.usageMix?.length > 1 && <div className="lot-warn">용도가 섞여 있습니다 — {lot.usageMix.join(", ")}. 대표 용도로 계산했습니다.</div>}
+                  {lot.failCount >= 3 && <div className="lot-warn">⚠ 유찰 {lot.failCount}회 — 평균 낙찰가율로는 예측이 맞지 않습니다. 유찰이 반복되는 물건은 별도 사유(유치권·대항력 임차인 등)를 확인하세요.</div>}
+                  {lot.specialCond && <div className="lot-warn">⚠ 특수조건 있음 (코드 {lot.specialCond}) — 매각물건명세서 확인 필요</div>}
+                </div>
+              );
+            })}
+
+            {cData.lots.length > 1 && (
+              <div className="lot-total">
+                사건 합계 · 감정가 {fmtEok(cData.lots.reduce((s, l) => s + l.appraisal, 0))}억
+                → 예상낙찰가 {fmtEok(cData.lots.reduce((s, l) => s + l.expected, 0))}억
+              </div>
+            )}
+            <div className="ar-note">※ 예상낙찰가 = 법원 감정가 × 해당 시군구·용도 매각가율(최근 1년 금액가중). 선순위채권·집행비용은 아직 반영되지 않습니다.</div>
           </div>
         )}
       </section>
