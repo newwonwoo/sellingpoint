@@ -13,7 +13,7 @@
 
 import * as XLSX from "xlsx-js-style";
 import { caseNoFromCell } from "./caseNo.js";
-import { benefitOf, extractAmounts, monthsBetween, opposability, scopeTenants, TAX_PARTY, VERDICT_LABEL, ymdLabel, num } from "./caseModel.js";
+import { benefitOf, extractAmounts, monthsBetween, NOT_FOUND_LABEL, opposability, scopeTenants, TAX_PARTY, VERDICT_LABEL, ymdLabel, num } from "./caseModel.js";
 
 // 한 번에 받을 사건 수 상한. 법원 서버에 대한 예의이기도 하고,
 // 이걸 넘기면 한 탭에서 도는 시간이 실무 인내심을 넘는다(건당 3~8초).
@@ -184,7 +184,7 @@ const VERDICT_COL = OUT_COLS.findIndex((c) => c.label === "실익판정");
 // input: 업로드 시트에서 온 { ref, claim, senior, assumed, cost }
 export function caseRows(data, input) {
   const lots = data?.lots || [];
-  if (!lots.length) return [failRow(data?.caseNo || input?.caseNo, input, "물건 없음")];
+  if (!lots.length) return [failRow(data?.caseNo || input?.caseNo, input, "물건 없음", "error")];
 
   const ci = data.caseInfo || {};
   const taxCount = (ci.parties || []).filter((p) => TAX_PARTY.has(p.type)).reduce((a, p) => a + p.count, 0);
@@ -271,15 +271,19 @@ export function caseRows(data, input) {
   });
 }
 
-// 조회 실패한 사건도 한 줄 남긴다 — 올린 사건이 전부 결과에 있어야 대사가 된다.
-export function failRow(caseNo, input, message) {
+// 조회 안 된 사건도 한 줄 남긴다 — 올린 사건이 전부 결과에 있어야 대사가 된다.
+// ⚠ 전부 "조회 실패"로 뭉뚱그리면 안 된다. 종결된 사건과 오타는 담당자가 할 일이 완전히 다르다.
+//   실익판정 칸에 사유를 그대로 넣어야 필터로 갈라낼 수 있다.
+export function failRow(caseNo, input, message, reason, status) {
   const row = new Array(OUT_COLS.length).fill(null);
   row[0] = input?.ref || "";
   row[1] = caseNo || "";
+  row[2] = status?.court || "";
   row[14] = input?.claim ?? null;
   row[15] = input?.senior ?? null;
   row[17] = input?.cost ?? null;
-  row[VERDICT_COL] = "조회 실패";
+  if (status?.claimAmount) row[24] = status.claimAmount;
+  row[VERDICT_COL] = NOT_FOUND_LABEL[reason] || NOT_FOUND_LABEL.error;
   row[OUT_COLS.length - 1] = message || "";
   return row;
 }
@@ -307,6 +311,10 @@ const VERDICT_STYLE = {
   "전액 회수 가능": mkVerdict("0C6B58", "C7E8DD"),
   "우리 채권액을 입력하세요": mkVerdict("69748A", "EEF2F7"),
   "판단 불가": mkVerdict("69748A", "EEF2F7"),
+  "종결된 사건": mkVerdict("69748A", "EEF2F7"),
+  "매각기일 없음": mkVerdict("8A5200", "FBE6BE"),
+  "부동산 사건 아님": mkVerdict("69748A", "EEF2F7"),
+  "사건번호 확인 필요": mkVerdict("8E1B16", "F7CFCC"),
   "조회 실패": mkVerdict("8E1B16", "EEF2F7"),
 };
 function mkVerdict(fg, bg) {
@@ -364,7 +372,15 @@ function metaSheet(meta) {
     ["임차인 보증금", "현황조사서에 '미상'으로 오는 경우가 많습니다."],
     ["이해관계인 이름", "법원이 마스킹해서 제공합니다(안OO). 동일인 확인은 따로 해야 합니다."],
     ["명세서 미공개", "매각물건명세서는 매각기일이 가까워야 공개됩니다. 그 전에는 선순위·청구금액이 비어 있습니다."],
-    ["조회 안 되는 사건", "과거 기일만 남은 사건(종결·취하)은 법원 검색에서 조회되지 않습니다."],
+    [],
+    ["조회되는 사건과 안 되는 사건"],
+    ["기준", "법원 매각물건 검색은 '지금 매각이 진행 중인 물건 목록'입니다. 사건 아카이브가 아닙니다."],
+    ["", "→ 앞으로 잡힌 매각기일이 있는 부동산 매물이 그 사건에 있어야 조회됩니다."],
+    ["종결된 사건", "매각·취하·기각으로 끝난 사건. 기일 범위를 어떻게 줘도 안 나옵니다. 실익분석 대상이 아닙니다."],
+    ["매각기일 없음", "사건은 진행 중인데 기일이 아직 없거나 변경·취소됐습니다. 기일이 잡히면 조회됩니다."],
+    ["부동산 사건 아님", "자동차·선박 경매입니다. 이 도구는 부동산만 봅니다."],
+    ["사건번호 확인 필요", "전국 어느 법원에도 그 번호가 없습니다. 이때만 오타를 의심하세요."],
+    ["", "사유는 사건내역 조회로 확인합니다(종결 여부는 법원의 종국구분코드 그대로)."],
   ];
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws["!cols"] = [{ wch: 24 }, { wch: 92 }];

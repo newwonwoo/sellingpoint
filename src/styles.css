@@ -382,3 +382,4 @@ tr.bad td { background: #fef4f3 !important; }
   .bx-row .go, .bx-stop { flex: 1 1 100%; }
   .bx-steps span { flex: 1 1 100%; }
 }
+.status .nf-note { margin-top: 6px; font-size: 12.5px; font-family: var(--sans); opacity: .9; }

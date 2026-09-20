@@ -63,6 +63,43 @@ export function monthsBetween(ymdA, ymdB) {
 export const TAX_PARTY = new Set(["교부권자", "압류권자"]);
 export const ymdLabel = (v) => { const s = String(v || ""); return s.length === 8 ? `${s.slice(0, 4)}.${s.slice(4, 6)}.${s.slice(6)}` : s; };
 
+// ── 조회 안 된 사건의 사유 ──────────────────────────────────
+// 매각물건 검색은 '지금 매각 진행 중인 물건 목록'이라, 사건이 멀쩡히 있어도 종결됐거나
+// 매각기일이 안 잡혀 있으면 0건이 온다. 이때 "사건번호를 확인하세요"는 대개 틀린 안내다.
+// api/court-case.js 가 사건내역으로 가려낸 reason 을 사람 말로 옮긴다.
+//   closed     종결 — 실익분석 대상이 아니다
+//   no_date    사건은 진행 중인데 잡힌 매각기일이 없다(기일 미정·변경·취소, 집행정지 등)
+//   not_realty 자동차·선박 경매 — 이 앱은 부동산만 본다. 기다려도 안 나온다
+//   absent     어느 법원에도 없다 — 이때만 입력을 의심한다
+export const NOT_FOUND_LABEL = {
+  closed: "종결된 사건",
+  no_date: "매각기일 없음",
+  not_realty: "부동산 사건 아님",
+  absent: "사건번호 확인 필요",
+  error: "조회 실패",
+};
+export function notFoundText(d) {
+  const where = [d?.court, d?.dept].filter(Boolean).join(" ");
+  if (d?.reason === "closed") {
+    return `${where ? where + " " : ""}${d.caseName || "사건"} — ${d.closedDate ? `${ymdLabel(d.closedDate)}에 ` : ""}종결된 사건입니다.`
+      + " 매각이 끝났거나 취하·기각된 사건이라 매각물건 검색에 나오지 않습니다. 실익분석 대상이 아닙니다.";
+  }
+  if (d?.reason === "no_date") {
+    return `${where ? where + " " : ""}${d.caseName || "사건"} — 사건은 진행 중이지만 잡힌 매각기일이 없습니다.`
+      + (d.suspended ? ` 집행정지 상태입니다${d.suspendReason ? ` (${d.suspendReason})` : ""}.` : "")
+      + (d.appealed ? " 항고가 있습니다." : "")
+      + " 기일이 지정되면 조회됩니다.";
+  }
+  if (d?.reason === "not_realty") {
+    return `${where ? where + " " : ""}${d.caseName || "사건"} — 부동산 경매가 아닙니다.`
+      + " 이 화면은 부동산 매각물건만 조회합니다. 기일이 잡혀도 여기서는 나오지 않습니다.";
+  }
+  if (d?.reason === "absent") {
+    return "전국 어느 법원에도 이 사건번호가 없습니다. 번호를 확인해주세요 (연도·타경·일련번호).";
+  }
+  return "조회하지 못했습니다.";
+}
+
 // ── 임차인을 매물별로 가른다 ──
 // 현황조사서는 사건 단위로 오고 임차인은 objctSeq(목적물)에 묶여 있다. 매물이 여럿인
 // 사건에서 전체 임차인을 모든 매물에 그대로 뿌리면, 남의 물건 임차인이 이 매물의
