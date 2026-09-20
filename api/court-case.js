@@ -17,6 +17,8 @@ const SURVEY_PATH = "/pgj/pgj15B/selectCurstExmndc.on";       // 현황조사서
 const PARTY_PATH  = "/pgj/pgj15A/selectAuctnCsSrchRslt.on";   // 사건내역 (이해관계인·관련사건·항고)
 const APPRAISAL_PATH = "/pgj/pgj15B/selectAeeWevlInfo.on";    // 감정평가서 (가격시점·평가사)
 const SEED_PATH = "/pgj/index.on?w2xPath=/pgj/ui/pgj100/PGJ151F00.xml";
+const PAGE_SIZE = 40;    // 사이트와 동일
+const MAX_PAGES = 10;    // 목적물 400건. 한 사건이 이보다 클 일은 없다(상한이 없으면 무한루프 위험)
 
 // 검색 본문 템플릿(필드 ~60개). 부분만 보내면 서버가 거절하므로 전체를 보낸다.
 const SEARCH_INFO_TEMPLATE = {
@@ -60,10 +62,17 @@ function browserHeaders() {
 }
 
 // "2024 타경 115858", "2024타경115858", "2024-115858" → "2024타경115858"
+// ⚠ 같은 규칙이 src/caseNo.js 에도 있다(엑셀 업로드에서 쓴다). 서버리스 함수를 자기완결로
+//   두려고 일부러 공유하지 않았다. 규칙을 고치면 두 곳을 같이 고칠 것 — 여기가 최종 판정이다.
 export function normalizeCaseNo(raw) {
   const s = String(raw || "").replace(/\s/g, "");
   const m = /^(\d{4})(?:타경|-)?(\d{1,6})$/.exec(s);
-  return m ? `${m[1]}타경${m[2]}` : null;
+  if (!m) return null;
+  // 앞 4자리는 접수 연도다. 검사하지 않으면 사업자번호 "1234567890" 이
+  // "1234타경567890" 으로 통과해 법원에 무의미한 조회를 날린다.
+  const y = Number(m[1]);
+  if (y < 1990 || y > new Date().getFullYear() + 1) return null;
+  return `${m[1]}타경${m[2]}`;
 }
 
 const n = (v) => { const k = Number(v); return Number.isFinite(k) ? k : 0; };
@@ -339,6 +348,52 @@ async function fetchAppraisal(cookie, csNo, courtCode) {
   } catch { return null; }
 }
 
+// 검색 한 페이지. pageSize 40 고정(사이트와 동일). totalCnt 를 같이 돌려준다.
+async function searchPage(cookie, csNo, pageNo, totalCnt) {
+  const r = await fetch(BASE + SEARCH_PATH, {
+    method: "POST",
+    headers: {
+      ...browserHeaders(),
+      "Content-Type": "application/json;charset=UTF-8",
+      Referer: BASE + SEED_PATH,
+      submissionid: "mf_wfm_mainFrame_sbm_selectGdsDtlSrch",
+      "SC-Userid": "SYSTEM",
+      Cookie: cookie,
+    },
+    body: JSON.stringify({
+      dma_pageInfo: {
+        pageNo,
+        pageSize: String(PAGE_SIZE),
+        bfPageNo: pageNo > 1 ? String(pageNo - 1) : "",
+        startRowNo: (pageNo - 1) * PAGE_SIZE + 1,
+        totalCnt: String(totalCnt),
+        // ⚠ totalYn 이 "N" 이면 서버가 전체 건수를 세지 않고 보낸 값을 그대로 돌려준다.
+        //   1페이지에서 "N" 을 보내면 totalCnt 가 0으로 돌아와 '다 받았다'고 착각한다
+        //   (실측: 2018타경6939 를 pageSize 10으로 받으면 10줄에서 멈춤 — 34줄인데).
+        //   항상 "Y" 로 물어봐야 1페이지 응답에 진짜 건수가 실려 온다.
+        totalYn: "Y",
+        groupTotalCount: 0,
+      },
+      dma_srchGdsDtlSrchInfo: { ...SEARCH_INFO_TEMPLATE, csNo, ...bidRange() },
+    }),
+  });
+  const text = await r.text();
+  if (r.status !== 200) {
+    const e = new Error(`법원 서버 응답 ${r.status}`);
+    e.status = r.status; e.sample = text.slice(0, 300);
+    throw e;
+  }
+  let data;
+  try { data = JSON.parse(text); }
+  catch {
+    const e = new Error("응답이 JSON이 아닙니다(차단 가능성).");
+    e.parse = true; e.sample = text.slice(0, 300);
+    throw e;
+  }
+  const d = data?.data || {};
+  return { rows: d.dlt_srchResult || [], totalCnt: parseInt(d?.dma_pageInfo?.totalCnt ?? "0", 10) || 0 };
+}
+
 export default async function handler(req, res) {
   try {
     const raw = req.method === "POST" ? req.body : req.query;
@@ -354,38 +409,31 @@ export default async function handler(req, res) {
     const cookie = ["mapGuide=Y", "pageCnt=40", "globalDebug=false",
       ...setCookies.map((c) => c.split(";")[0])].join("; ");
 
-    const r = await fetch(BASE + SEARCH_PATH, {
-      method: "POST",
-      headers: {
-        ...browserHeaders(),
-        "Content-Type": "application/json;charset=UTF-8",
-        Referer: BASE + SEED_PATH,
-        submissionid: "mf_wfm_mainFrame_sbm_selectGdsDtlSrch",
-        "SC-Userid": "SYSTEM",
-        Cookie: cookie,
-      },
-      body: JSON.stringify({
-        dma_pageInfo: {
-          pageNo: 1, pageSize: "40", bfPageNo: "", startRowNo: 1,
-          totalCnt: "0", totalYn: "N", groupTotalCount: 0,
-        },
-        dma_srchGdsDtlSrchInfo: { ...SEARCH_INFO_TEMPLATE, csNo, ...bidRange() },
-      }),
-    });
-
-    const text = await r.text();
-    if (r.status !== 200) {
-      return res.status(502).json({
-        error: `법원 서버 응답 ${r.status}`,
-        hint: "WAF/IP 차단일 수 있습니다. vercel dev(로컬) 또는 서울 IP에서 시도해보세요.",
-        sample: text.slice(0, 300),
-      });
+    // 2) 결과 전 페이지를 받는다.
+    // ⚠ 1페이지(40줄)만 읽으면 목적물이 많은 사건이 조용히 잘린다. 2018타경6939이 34줄이라
+    //   턱걸이로 안 걸렸을 뿐, 잘리면 감정가 합·면적·목적물 수가 전부 과소집계된다.
+    //   totalCnt 를 보고 남은 페이지를 이어 받는다(상한 MAX_PAGES).
+    let rows = [];
+    let totalCnt = 0;
+    try {
+      for (let pageNo = 1; pageNo <= MAX_PAGES; pageNo++) {
+        const page = await searchPage(cookie, csNo, pageNo, totalCnt);
+        totalCnt = page.totalCnt || totalCnt;
+        rows = pageNo === 1 ? page.rows : rows.concat(page.rows);
+        if (!page.rows.length || rows.length >= totalCnt) break;
+      }
+    } catch (e) {
+      if (e.parse) return res.status(502).json({ error: e.message, sample: e.sample });
+      if (e.status) {
+        return res.status(502).json({
+          error: e.message,
+          hint: "WAF/IP 차단일 수 있습니다. vercel dev(로컬) 또는 서울 IP에서 시도해보세요.",
+          sample: e.sample,
+        });
+      }
+      throw e;
     }
-    let data;
-    try { data = JSON.parse(text); }
-    catch { return res.status(502).json({ error: "응답이 JSON이 아닙니다(차단 가능성).", sample: text.slice(0, 300) }); }
 
-    const rows = data?.data?.dlt_srchResult || [];
     // 같은 줄이 중복으로 오는 경우가 있어 docid로 먼저 정리한다
     const seen = new Set();
     const uniq = [];
@@ -395,7 +443,13 @@ export default async function handler(req, res) {
       seen.add(key);
       uniq.push(x);
     }
+    rows = null;
     const head = uniq[0] || {};
+    // ⚠ 사건번호의 연도·일련번호는 법원별로 따로 돌아간다. 법원코드를 안 주고 검색하므로
+    //   같은 번호가 두 법원에 있으면 두 사건이 섞여 온다. 합쳐서 계산하면 안 되니 알린다.
+    //   (화면은 경고를 띄우고, 엑셀은 '특이사항'에 찍는다)
+    const courtCodes = [...new Set(uniq.map((x) => String(x.boCd || "")).filter(Boolean))];
+    const courtNames = [...new Set(uniq.map((x) => String(x.jiwonNm || "")).filter(Boolean))];
     const lots = groupByLot(uniq);
 
     // 현황조사서·사건내역은 사건 단위라 한 번만 부른다.
@@ -417,10 +471,11 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       caseNo: csNo,
-      court: head.jiwonNm || "",
+      court: courtNames.join(" / ") || "",
       dept: head.jpDeptNm || "",
       tel: head.tel || "",
       objectCount: uniq.length,
+      courtConflict: courtCodes.length > 1,
       survey,
       caseInfo,
       appraisal,
