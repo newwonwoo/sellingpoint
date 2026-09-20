@@ -266,3 +266,39 @@ tr.bad td { background: #fef4f3 !important; }
 }
 .tabs button:hover { color: var(--ink); }
 .tabs button.on { color: var(--teal); border-bottom-color: var(--teal); }
+
+/* 사건 정보 */
+.case-info { margin-top: 10px; padding: 11px 14px; background: #fff; border: 1px solid var(--line); border-radius: 9px; }
+.case-info dl { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 6px 16px; margin: 0; }
+.case-info dt { font-size: 11.5px; color: var(--muted); font-weight: 600; }
+.case-info dd { margin: 0 0 4px; font-size: 13.5px; font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+/* 실익 판단 */
+.benefit { margin-top: 11px; border: 1px solid #bfe3d8; border-radius: 10px; padding: 12px 14px; background: #f7fcfa; }
+.bf-head { font-size: 13px; font-weight: 700; color: var(--teal); margin-bottom: 9px; }
+.bf-head i { font-style: normal; font-weight: 500; color: var(--muted); font-size: 11.5px; margin-left: 6px; }
+.bf-inputs { display: flex; flex-wrap: wrap; gap: 8px; }
+.bf-in { flex: 1 1 150px; display: flex; flex-direction: column; gap: 4px; }
+.bf-in span { font-size: 11.5px; color: var(--muted); font-weight: 600; }
+.bf-in i { font-style: normal; color: var(--teal); margin-left: 4px; font-size: 10.5px; }
+.bf-in input {
+  height: 34px; padding: 0 9px; border: 1px solid var(--line); border-radius: 7px; background: #fff;
+  font-family: var(--mono); font-variant-numeric: tabular-nums; font-size: 13px; width: 100%; box-sizing: border-box;
+}
+.bf-in input:focus { outline: 2px solid var(--teal); outline-offset: 1px; border-color: transparent; }
+.bf-flow { margin-top: 11px; border-top: 1px solid #d6ece4; padding-top: 9px; }
+.bf-flow > div { display: flex; justify-content: space-between; align-items: baseline; padding: 3px 0; font-size: 13px; }
+.bf-flow span { color: var(--muted); }
+.bf-flow b { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.bf-flow .minus span, .bf-flow .minus b { color: #8E1B16; }
+.bf-flow .eq { border-top: 1px solid #d6ece4; margin-top: 3px; padding-top: 6px; }
+.bf-flow .eq span, .bf-flow .eq b { color: var(--ink); font-weight: 700; }
+.bf-flow .final span, .bf-flow .final b { color: var(--teal); font-size: 15px; }
+.bf-verdict { margin-top: 10px; padding: 9px 12px; border-radius: 8px; font-size: 13.5px; }
+.bf-verdict b { font-size: 15px; }
+.bf-verdict.v-none { background: #fdf3f2; border: 1px solid #f0c9c6; color: var(--red); }
+.bf-verdict.v-partial { background: #fffbeb; border: 1px solid #fde68a; color: #8A5200; }
+.bf-verdict.v-full { background: #ecfdf5; border: 1px solid #a7f3d0; color: #047857; }
+.bf-verdict.v-needclaim,
+.bf-verdict.v-unknown { background: #f1f5f9; border: 1px solid var(--line); color: var(--muted); }
+.bf-caution { margin-top: 7px; font-size: 11.5px; color: #8A5200; }

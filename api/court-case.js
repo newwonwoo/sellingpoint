@@ -151,6 +151,11 @@ async function fetchDetail(cookie, csNo, courtCode, lotNo) {
         area: o.objctArDts || "", landCategory: o.ldcgDts || "",
         appraisal: n(o.aeeEvlAmt),
       })),
+      // 감정평가 요점 (위치·교통·이용상황·도로·용도지역 등). 항목코드의 라벨표가 공개돼 있지
+      // 않아 문장만 순서대로 담는다 — 문장 자체가 무엇에 대한 설명인지 스스로 밝힌다.
+      appraisalNotes: (d.aeeWevlMnpntLst || [])
+        .map((x) => String(x.aeeWevlMnpntCtt || "").trim())
+        .filter((x) => x && x !== "없음."),
       schedule: (d.gdsDspslDxdyLst || []).map((x) => ({
         date: x.dxdyYmd || "", kind: x.auctnDxdyKndCd || "",
         minPrice: n(x.tsLwsDspslPrc), soldPrice: n(x.dspslAmt),

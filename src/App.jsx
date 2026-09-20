@@ -160,6 +160,38 @@ const initialTab = () => {
   const h = String(window.location.hash || "").replace(/^#\/?/, "");
   return TABS.some((t) => t.key === h) ? h : "stats";
 };
+// 인수권리 문장에서 금액을 뽑는다. 예: "임대차보증금 368,000,000원" → 368000000
+// 낙찰자가 떠안는 금액이라 예상낙찰가에서 빼야 배당재원이 나온다.
+function extractAmounts(text) {
+  const out = [];
+  for (const m of String(text || "").matchAll(/([0-9][0-9,]{5,})\s*원/g)) {
+    const v = Number(m[1].replace(/,/g, ""));
+    if (Number.isFinite(v) && v > 0) out.push(v);
+  }
+  return out;
+}
+
+// 실익 계산 — 폭포수.
+//   예상낙찰가 − 인수권리 − 집행비용 = 배당재원
+//   배당재원 − 선순위채권 = 우리 배당가능액
+// 인수권리는 낙찰자가 떠안으므로 그만큼 낮게 응찰한다. 배당에도 들어가지 않는다.
+function benefitOf({ expected, assumed, cost, senior, claim }) {
+  const E = num(expected), A = num(assumed), C = num(cost), S = num(senior), K = num(claim);
+  const pool = Math.max(0, E - A - C);          // 배당재원
+  const ours = Math.max(0, pool - S);           // 우리 순위까지 내려온 금액
+  // 배당은 채권액 한도까지만 받는다. 남는 건 후순위·채무자 몫이라 우리 회수액이 아니다.
+  const recovered = K > 0 ? Math.min(ours, K) : ours;
+  const rate = K > 0 ? (recovered / K) * 100 : null;
+  const verdict = !E ? "unknown"
+    : ours <= 0 ? "none"        // 배당가능액이 0이면 채권액과 무관하게 실익 없음
+      : K <= 0 ? "needclaim"
+        : ours >= K ? "full" : "partial";
+  return { E, A, C, S, K, pool, ours, recovered, rate, verdict };
+}
+const VERDICT_LABEL = {
+  none: "실익 없음", partial: "일부 회수", full: "전액 회수 가능",
+  needclaim: "우리 채권액을 입력하세요", unknown: "판단 불가",
+};
 const ymdLabel = (v) => { const s = String(v || ""); return s.length === 8 ? `${s.slice(0,4)}.${s.slice(4,6)}.${s.slice(6)}` : s; };
 
 // ── 2차 MVP: 주소 → 시군구 로컬 파싱 (외부 API 키 불필요) ──
@@ -270,6 +302,10 @@ export default function App() {
   const [cBusy, setCBusy] = useState(false);
   const [cErr, setCErr] = useState("");
   const [cData, setCData] = useState(null);
+  // 매물별 실익 입력 { [lotNo]: {claim, senior, assumed, cost} }
+  const [cCalc, setCCalc] = useState({});
+  const setCalcField = (lotNo, field, v) =>
+    setCCalc((prev) => ({ ...prev, [lotNo]: { ...(prev[lotNo] || {}), [field]: v } }));
 
   // ── 낙찰가율 역추적 상태 ──
   const [btSido, setBtSido] = useState("11");
@@ -601,7 +637,7 @@ export default function App() {
   async function runCaseLookup() {
     const no = caseNo.trim();
     if (!no) { setCErr("사건번호를 입력하세요 (예: 2024타경115858)"); return; }
-    setCBusy(true); setCErr(""); setCData(null);
+    setCBusy(true); setCErr(""); setCData(null); setCCalc({});
     try {
       const r = await fetch("/api/court-case", {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -633,6 +669,13 @@ export default function App() {
         } catch { /* 낙찰가율만 실패해도 감정가·최저가는 보여준다 */ }
         lots.push({ ...lot, rate, matched, exact, expected: lot.appraisal * rate / 100 });
       }
+      // 인수권리 문장에 금액이 적혀 있으면 미리 채워둔다(사용자가 고칠 수 있게).
+      const prefill = {};
+      for (const lot of lots) {
+        const amts = extractAmounts(lot.assumedRights);
+        if (amts.length) prefill[lot.lotNo] = { assumed: String(Math.max(...amts)) };
+      }
+      setCCalc(prefill);
       setCData({ ...data, lots, period: `${ymLabel(startYM)}~${ymLabel(endYM)}` });
     } catch (e) { setCErr(String(e.message || e)); }
     finally { setCBusy(false); }
@@ -793,6 +836,20 @@ export default function App() {
               </div>
             </div>
 
+            {/* 사건 정보 — 매물 공통 */}
+            {cData.lots[0]?.caseName && (
+              <div className="case-info">
+                <dl>
+                  <dt>사건명</dt><dd>{cData.lots[0].caseName}</dd>
+                  {cData.lots[0].receiptDate && <><dt>접수일</dt><dd>{ymdLabel(cData.lots[0].receiptDate)}</dd></>}
+                  {cData.lots[0].startDate && <><dt>개시결정</dt><dd>{ymdLabel(cData.lots[0].startDate)}</dd></>}
+                  {cData.lots[0].demandDeadline && <><dt>배당요구종기</dt><dd>{ymdLabel(cData.lots[0].demandDeadline)}</dd></>}
+                  {cData.lots[0].claimAmount > 0 && <><dt>청구금액</dt><dd>{fmtEok(cData.lots[0].claimAmount)}억</dd></>}
+                  {cData.lots[0].specWriteDate && <><dt>명세서 작성</dt><dd>{ymdLabel(cData.lots[0].specWriteDate)}</dd></>}
+                </dl>
+              </div>
+            )}
+
             {cData.lots.map((lot) => {
               const o = lot.objects[0] || {};
               const band = lot.rate >= 100 ? "hi" : lot.rate >= 80 ? "mid" : lot.rate > 0 ? "lo" : "na";
@@ -858,6 +915,63 @@ export default function App() {
                     <details className="lot-remark">
                       <summary>명세서 비고</summary>
                       <pre>{lot.specRemark}</pre>
+                    </details>
+                  )}
+
+                  {/* ── 실익 판단 ── */}
+                  {(() => {
+                    const c = cCalc[lot.lotNo] || {};
+                    const b = benefitOf({
+                      expected: lot.expected, assumed: c.assumed,
+                      cost: c.cost, senior: c.senior, claim: c.claim,
+                    });
+                    const eok = (v) => (v / 1e8);
+                    const field = (key, label, hint) => (
+                      <label className="bf-in">
+                        <span>{label}{hint ? <i>{hint}</i> : null}</span>
+                        <input type="number" min="0" step="1000000" placeholder="0"
+                          value={c[key] ?? ""} onChange={(e) => setCalcField(lot.lotNo, key, e.target.value)} />
+                      </label>
+                    );
+                    return (
+                      <div className="benefit">
+                        <div className="bf-head">실익 판단 <i>단위: 원 — 등기부·집행비용은 직접 입력</i></div>
+                        <div className="bf-inputs">
+                          {field("claim", "우리 채권액")}
+                          {field("senior", "선순위채권 합계", "등기부")}
+                          {field("assumed", "인수권리 금액", lot.assumedRights ? "자동" : null)}
+                          {field("cost", "집행비용")}
+                        </div>
+                        <div className="bf-flow">
+                          <div><span>예상낙찰가</span><b>{fmtEok(b.E)}억</b></div>
+                          <div className="minus"><span>− 인수권리</span><b>{fmtEok(b.A)}억</b></div>
+                          <div className="minus"><span>− 집행비용</span><b>{fmtEok(b.C)}억</b></div>
+                          <div className="eq"><span>= 배당재원</span><b>{fmtEok(b.pool)}억</b></div>
+                          <div className="minus"><span>− 선순위채권</span><b>{fmtEok(b.S)}억</b></div>
+                          <div className="eq final"><span>= 우리 배당가능액</span><b>{fmtEok(b.ours)}억</b></div>
+                        </div>
+                        <div className={`bf-verdict v-${b.verdict}`}>
+                          <b>{VERDICT_LABEL[b.verdict]}</b>
+                          {b.K > 0 && b.verdict !== "unknown" && (
+                            <span> · 채권 {fmtEok(b.K)}억 중 {fmtEok(b.recovered)}억 회수
+                              {b.rate != null ? ` (${b.rate.toFixed(0)}%)` : ""}
+                              {b.ours > b.K ? ` · 배당가능액 ${fmtEok(b.ours)}억 중 초과분은 후순위 몫` : ""}</span>
+                          )}
+                          {b.verdict === "needclaim" && <span> · 배당재원은 {fmtEok(b.ours)}억까지 내려옵니다</span>}
+                        </div>
+                        {lot.failCount >= 3 && (
+                          <div className="bf-caution">유찰 {lot.failCount}회 물건이라 예상낙찰가 자체가 불확실합니다. 위 판정은 참고용입니다.</div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  {lot.appraisalNotes?.length > 0 && (
+                    <details className="lot-remark">
+                      <summary>감정평가 요점 {lot.appraisalNotes.length}건</summary>
+                      <ul className="lr-objs">
+                        {lot.appraisalNotes.map((t, i) => <li key={i}>{t}</li>)}
+                      </ul>
                     </details>
                   )}
 
