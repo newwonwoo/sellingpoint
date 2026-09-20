@@ -7,6 +7,7 @@
 
 const BASE = "https://www.courtauction.go.kr";
 const SEARCH_PATH = "/pgj/pgjsearch/searchControllerMain.on";
+const DETAIL_PATH = "/pgj/pgj15B/selectAuctnCsSrchRslt.on";   // 사건상세 (매각물건명세서 항목 포함)
 const SEED_PATH = "/pgj/index.on?w2xPath=/pgj/ui/pgj100/PGJ151F00.xml";
 
 // 검색 본문 템플릿(필드 ~60개). 부분만 보내면 서버가 거절하므로 전체를 보낸다.
@@ -63,6 +64,7 @@ function groupByLot(rows) {
     if (!lot) {
       lot = {
         lotNo: key,
+        courtCode: x.boCd || "",           // 사건상세 조회에 필요
         usageCount: {},
         sido: x.hjguSido || "", sigungu: x.hjguSigu || "", dong: x.hjguDong || "",
         sidoCode: x.daepyoSidoCd || "", sigunguCode: x.daepyoSiguCd || "",
@@ -97,6 +99,64 @@ function groupByLot(rows) {
     const { usageCount, ...rest } = lot;
     return { ...rest, usage: ranked[0]?.[0] || "", usageMix: ranked.map(([k, v]) => `${k}(${v})`) };
   });
+}
+
+// 사건상세 — 매각물건명세서의 핵심 3항목이 여기 들어 있다.
+//   tprtyRnkHypthcStngDts : 최선순위 설정일자 (이보다 먼저 전입한 임차인은 낙찰자가 인수)
+//   ndstrcRghCtt          : 매각으로 소멸하지 않는 권리 = 인수권리 (보증금 인수 등)
+//   sprfcExstcDts         : 법정지상권 성립 여지
+// 청구금액(clmAmt)·배당요구종기·목적물별 감정평가액·기일 저감이력도 같이 온다.
+// ⚠ 응답에 사진 base64(csPicLst)가 들어 있어 용량이 크다. 필요한 필드만 골라 쓴다.
+async function fetchDetail(cookie, csNo, courtCode, lotNo) {
+  try {
+    const r = await fetch(BASE + DETAIL_PATH, {
+      method: "POST",
+      headers: {
+        ...browserHeaders(),
+        "Content-Type": "application/json;charset=UTF-8",
+        Referer: BASE + "/pgj/index.on?w2xPath=/pgj/ui/pgj100/PGJ154M03.xml",
+        "SC-Userid": "SYSTEM",
+        "SC-Pgmid": "PGJ154M03",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        dma_srchGdsDtlSrch: {
+          csNo, cortOfcCd: courtCode, dspslGdsSeq: String(lotNo),
+          pgmId: "PGJ15BF01", srchInfo: {},
+        },
+      }),
+    });
+    if (r.status !== 200) return null;
+    const d = (await r.json())?.data?.dma_result;
+    if (!d) return null;
+    const b = d.csBaseInfo || {};
+    const g = d.dspslGdsDxdyInfo || {};
+    return {
+      caseName: b.csNm || "",                       // 부동산강제경매 / 임의경매
+      receiptDate: b.csRcptYmd || "",
+      startDate: b.csCmdcYmd || "",
+      claimAmount: n(b.clmAmt),                     // 청구금액 (경매 신청 채권자)
+      appraisalExact: n(g.aeeEvlAmt),               // 감정평가액 (원 단위)
+      firstMinPrice: n(g.fstPbancLwsDspslPrc),
+      seniorDate: g.tprtyRnkHypthcStngDts || "",    // 최선순위 설정일자
+      assumedRights: g.ndstrcRghCtt || "",          // 인수권리
+      surfaceRight: g.sprfcExstcDts || "",          // 법정지상권
+      specRemark: g.gdsSpcfcRmk || "",              // 매각물건명세서 비고
+      lotRemark: g.dspslGdsRmk || "",
+      specWriteDate: g.gdsSpcfcWrtYmd || "",        // 명세서 작성일(정보 기준일)
+      demandDeadline: d.dstrtDemnInfo?.[0]?.dstrtDemnLstprdYmd || "",  // 배당요구종기
+      objectAppraisals: (d.gdsDspslObjctLst || []).map((o) => ({
+        seq: o.dspslObjctSeq, sigungu: o.adongSggNm || "", dong: o.adongEmdNm || "",
+        jibun: o.rprsLtnoAddr || "", building: o.bldNm || "",
+        area: o.objctArDts || "", landCategory: o.ldcgDts || "",
+        appraisal: n(o.aeeEvlAmt),
+      })),
+      schedule: (d.gdsDspslDxdyLst || []).map((x) => ({
+        date: x.dxdyYmd || "", kind: x.auctnDxdyKndCd || "",
+        minPrice: n(x.tsLwsDspslPrc), soldPrice: n(x.dspslAmt),
+      })).filter((x) => x.minPrice > 0),
+    };
+  } catch { return null; }
 }
 
 export default async function handler(req, res) {
@@ -156,13 +216,26 @@ export default async function handler(req, res) {
       uniq.push(x);
     }
     const head = uniq[0] || {};
+    const lots = groupByLot(uniq);
+
+    // 매물마다 사건상세를 붙인다(선순위·청구금액·명세서 비고). 실패해도 기본 정보는 살린다.
+    for (const lot of lots) {
+      const detail = await fetchDetail(cookie, csNo, lot.courtCode, lot.lotNo);
+      if (detail) {
+        // 상세의 감정평가액이 원 단위로 정확하므로 그쪽을 쓴다
+        if (detail.appraisalExact > 0) lot.appraisal = detail.appraisalExact;
+        Object.assign(lot, detail);
+      }
+      delete lot.courtCode;
+    }
+
     return res.status(200).json({
       caseNo: csNo,
       court: head.jiwonNm || "",
       dept: head.jpDeptNm || "",
       tel: head.tel || "",
       objectCount: uniq.length,
-      lots: groupByLot(uniq),
+      lots,
     });
   } catch (e) {
     return res.status(500).json({ error: String((e && e.message) || e) });

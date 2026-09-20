@@ -147,6 +147,7 @@ function checkRow(r) {
 }
 const isSubtotal = (name) => name === "소계" || name === "전체";
 const ymLabel = (ym) => `${String(ym).slice(0, 4)}.${String(ym).slice(4)}`;
+const ymdLabel = (v) => { const s = String(v || ""); return s.length === 8 ? `${s.slice(0,4)}.${s.slice(4,6)}.${s.slice(6)}` : s; };
 
 // ── 2차 MVP: 주소 → 시군구 로컬 파싱 (외부 API 키 불필요) ──
 // 시도 별칭(신·구 명칭 모두) → regions.json 시도코드. 긴 별칭 먼저 매칭.
@@ -736,7 +737,7 @@ export default function App() {
           />
           <button className="go" onClick={runCaseLookup} disabled={cBusy}>{cBusy ? "조회 중…" : "실익 조회"}</button>
         </div>
-        <div className="addr-hint">법원 감정가 × 그 시군구·용도 낙찰가율(최근 1년) = 예상낙찰가 · 감정가는 법원이 매긴 값이라 시세 추정이 필요 없습니다</div>
+        <div className="addr-hint">감정평가액 · 청구금액 · 최선순위 설정일자 · 인수권리를 법원 매각물건명세서에서 가져옵니다</div>
 
         {cErr && <div className="status err">{cErr}</div>}
 
@@ -777,6 +778,59 @@ export default function App() {
                       : "낙찰가율을 가져오지 못했습니다"}
                     {vsMin != null && lot.rate ? ` · 최저가 대비 ${vsMin >= 0 ? "+" : ""}${vsMin.toFixed(0)}%` : ""}
                   </div>
+
+                  {/* 매각물건명세서 — 선순위 판단의 근거 */}
+                  {(lot.seniorDate || lot.claimAmount > 0 || lot.demandDeadline) && (
+                    <div className="lot-rights">
+                      <div className="lr-title">
+                        매각물건명세서
+                        {lot.specWriteDate ? ` · 작성 ${ymdLabel(lot.specWriteDate)}` : ""}
+                        {lot.caseName ? ` · ${lot.caseName}` : ""}
+                      </div>
+                      <dl>
+                        {lot.seniorDate && <><dt>최선순위 설정</dt><dd>{lot.seniorDate}</dd></>}
+                        {lot.claimAmount > 0 && <><dt>청구금액</dt><dd>{fmtEok(lot.claimAmount)}억 <span className="lr-sub">(경매 신청 채권자)</span></dd></>}
+                        {lot.demandDeadline && <><dt>배당요구종기</dt><dd>{ymdLabel(lot.demandDeadline)}</dd></>}
+                        {lot.surfaceRight && <><dt>법정지상권</dt><dd>{lot.surfaceRight}</dd></>}
+                      </dl>
+                      {lot.seniorDate && (
+                        <div className="lr-hint">※ 이 날짜보다 먼저 전입한 임차인은 대항력이 있어 낙찰자가 인수합니다.</div>
+                      )}
+                    </div>
+                  )}
+
+                  {lot.assumedRights && (
+                    <div className="lot-danger">
+                      <b>인수권리 있음</b> — 매각으로 소멸하지 않는 권리입니다. 낙찰자가 떠안습니다.
+                      <div className="ld-body">{lot.assumedRights}</div>
+                    </div>
+                  )}
+
+                  {lot.schedule?.length > 1 && (
+                    <div className="lot-sched">
+                      저감 이력 {lot.schedule.length}회 · {lot.schedule.map((x) => fmtEok(x.minPrice)).join(" → ")}억
+                    </div>
+                  )}
+
+                  {lot.specRemark && (
+                    <details className="lot-remark">
+                      <summary>명세서 비고</summary>
+                      <pre>{lot.specRemark}</pre>
+                    </details>
+                  )}
+
+                  {lot.objectAppraisals?.length > 1 && (
+                    <details className="lot-remark">
+                      <summary>목적물별 감정평가액 {lot.objectAppraisals.length}건</summary>
+                      <ul className="lr-objs">
+                        {lot.objectAppraisals.map((o) => (
+                          <li key={o.seq}>
+                            #{o.seq} {o.dong} {o.jibun} {o.building} {o.area} {o.landCategory} — <b>{fmtEok(o.appraisal)}억</b>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
                   {lot.usageMix?.length > 1 && <div className="lot-warn">용도가 섞여 있습니다 — {lot.usageMix.join(", ")}. 대표 용도로 계산했습니다.</div>}
                   {lot.failCount >= 3 && <div className="lot-warn">⚠ 유찰 {lot.failCount}회 — 평균 낙찰가율로는 예측이 맞지 않습니다. 유찰이 반복되는 물건은 별도 사유(유치권·대항력 임차인 등)를 확인하세요.</div>}
                   {lot.specialCond && <div className="lot-warn">⚠ 특수조건 있음 (코드 {lot.specialCond}) — 매각물건명세서 확인 필요</div>}
@@ -790,7 +844,7 @@ export default function App() {
                 → 예상낙찰가 {fmtEok(cData.lots.reduce((s, l) => s + l.expected, 0))}억
               </div>
             )}
-            <div className="ar-note">※ 예상낙찰가 = 법원 감정가 × 해당 시군구·용도 매각가율(최근 1년 금액가중). 선순위채권·집행비용은 아직 반영되지 않습니다.</div>
+            <div className="ar-note">※ 예상낙찰가 = 법원 감정가 × 해당 시군구·용도 매각가율(최근 1년 금액가중). 최선순위 설정일자·인수권리는 매각물건명세서에서 가져온 값이며, 임차인 개별 현황과 집행비용은 반영되지 않습니다.</div>
           </div>
         )}
       </section>

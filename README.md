@@ -29,15 +29,36 @@ vercel dev        # 로컬(한국 IP) — WAF 안전. 엑셀 대량수집도 이
 목적물마다 같은 값이 반복된다. 그대로 더하면 2018타경6939이 34줄 × 77.88억 = **2,647억**이 된다
 (실제 77.88억). 그래서 매물로 묶고 금액은 한 번만, 면적은 목적물 합으로 만든다.
 
+### 선순위 정보도 법원이 준다
+`/pgj/pgj15B/selectAuctnCsSrchRslt.on` (사건상세)에 **매각물건명세서 핵심 3항목**이 들어 있다.
+등기부를 떼지 않아도 인수 여부 판단의 근거가 나온다.
+
+| 필드 | 뜻 |
+|---|---|
+| `tprtyRnkHypthcStngDts` | **최선순위 설정일자** — 이보다 먼저 전입한 임차인은 낙찰자가 인수 |
+| `ndstrcRghCtt` | **인수권리** — 매각으로 소멸하지 않는 권리(보증금 인수 등) |
+| `sprfcExstcDts` | 법정지상권 성립 여지 |
+| `clmAmt` | 청구금액 (경매 신청 채권자) |
+| `dstrtDemnLstprdYmd` | 배당요구종기 |
+| `gdsDspslObjctLst[].aeeEvlAmt` | 목적물별 감정평가액 |
+| `gdsDspslDxdyLst` | 기일별 최저가(저감 이력)·낙찰가 |
+
+요청은 `{csNo, cortOfcCd, dspslGdsSeq}` 세 개뿐이고 `cortOfcCd`는 검색결과의 `boCd`,
+`dspslGdsSeq`는 `maemulSer`다. ⚠ 응답에 사진 base64(`csPicLst`)가 들어 있어 크다 — 필요한 필드만 고른다.
+
+예) 2024타경115858은 감정가 3.61억인데 인수보증금이 3.68억이라 9회 저감됐다.
+이건 평균 낙찰가율로는 절대 설명이 안 되는 물건이고, 인수권리를 보여주면 바로 납득된다.
+
 한계: 모든 사건이 조회되지는 않는다(기일 취소·변경 사건은 0건). 유찰 3회 이상이면 평균 낙찰가율로
-예측이 맞지 않아 경고를 띄운다. 선순위채권·집행비용은 아직 반영하지 않는다.
+예측이 맞지 않아 경고를 띄운다. 임차인 개별 현황(현황조사서)과 집행비용은 아직 반영하지 않는다.
 
 ## API
 - `api/court-stats.js` — selectRletCortDspslStats.on. `sigunguCodes`(배열)를 받아 세션 하나로 전부 조회 후 합산.
   `months`(배열, 최대 12개)를 주면 그 달들을 각각 조회해 월별로 돌려준다(역추적용).
 - `api/court-adong.js` — selectAdong.on. 시군구 목록(= 법원이 실제로 쓰는 코드의 출처).
-- `api/court-case.js` — searchControllerMain.on 에 `csNo`(사건번호)만 전달. 법원코드 불필요.
-  응답을 매물 단위로 묶어 돌려준다(위 ⚠ 참고).
+- `api/court-case.js` — searchControllerMain.on 에 `csNo`(사건번호)만 전달(법원코드 불필요) →
+  매물 단위로 묶은 뒤, 매물마다 selectAuctnCsSrchRslt.on(사건상세)을 붙여 선순위·청구금액·
+  명세서 비고까지 한 번에 돌려준다.
 - `src/courtCodes.js` — 시군구 이름 → 법원 코드 해석 + 합산 로직.
 - `src/statsModel.js` — 용도 위계(단일/세부/소계/전체) 판정 + 물건↔통계 용도명 매핑(`matchUsageRow`).
   경매물건은 `연립주택,다세대,빌라`, 통계는 `연립주택,다세대`라 그대로 매칭하면 '전체'로 떨어진다.
