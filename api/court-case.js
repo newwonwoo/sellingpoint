@@ -15,6 +15,7 @@ const SEARCH_PATH = "/pgj/pgjsearch/searchControllerMain.on";
 const DETAIL_PATH = "/pgj/pgj15B/selectAuctnCsSrchRslt.on";   // 사건상세 (매각물건명세서 항목 포함)
 const SURVEY_PATH = "/pgj/pgj15B/selectCurstExmndc.on";       // 현황조사서 (임차인 전입일·점유관계)
 const PARTY_PATH  = "/pgj/pgj15A/selectAuctnCsSrchRslt.on";   // 사건내역 (이해관계인·관련사건·항고)
+const APPRAISAL_PATH = "/pgj/pgj15B/selectAeeWevlInfo.on";    // 감정평가서 (가격시점·평가사)
 const SEED_PATH = "/pgj/index.on?w2xPath=/pgj/ui/pgj100/PGJ151F00.xml";
 
 // 검색 본문 템플릿(필드 ~60개). 부분만 보내면 서버가 거절하므로 전체를 보낸다.
@@ -271,7 +272,22 @@ async function fetchParties(cookie, csNo, courtCode) {
       if (!groups.has(t)) groups.set(t, []);
       groups.get(t).push(p.intrpsNm || "");
     }
+    // 경매신청자 = 채권자 중 가장 먼저 등재된 사람(intrpsSeq 최소). 청구금액이 이 사람 몫이다.
+    const creditors = (d.dlt_rletCsIntrpsLst || [])
+      .filter((p) => p.auctnIntrpsDvsNm === "채권자")
+      .sort((a, b) => n(a.intrpsSeq) - n(b.intrpsSeq));
+    const applicant = creditors[0]
+      ? { name: creditors[0].intrpsNm || "", seq: n(creditors[0].intrpsSeq) }
+      : null;
+    // ⚠ 이름이 마스킹("안OO")이라 동일인 판정을 할 수 없다. 채권자 3명·임차인 5명이면
+    //   우연히 같은 마스킹이 나올 수 있다. 단정하지 말고 '확인 필요' 힌트로만 넘긴다.
+    //   (청구금액이 인수권리 문장의 보증금과 일치하면 화면에서 근거를 덧붙인다)
+    const applicantNameInTenants = !!applicant && (d.dlt_rletCsIntrpsLst || []).some(
+      (p) => p.intrpsNm === applicant.name && /임차/.test(p.auctnIntrpsDvsNm || ""),
+    );
     return {
+      applicant,
+      applicantNameInTenants,
       parties: [...groups.entries()].map(([type, names]) => ({ type, count: names.length, names })),
       partyCount: (d.dlt_rletCsIntrpsLst || []).length,
       relatedCases: (d.dlt_rletReltCsLst || []).map((x) => ({
@@ -284,6 +300,41 @@ async function fetchParties(cookie, csNo, courtCode) {
       appealed: b.rletApalYn === "Y",
       suspended: SUSPENDED.has(String(b.auctnSuspStatCd || "")),
       suspendReason: b.csProgSuspRsn || "",
+    };
+  } catch { return null; }
+}
+
+// 감정평가서 — 가격시점이 핵심이다.
+// 감정가는 '그 시점' 시세다. 매각기일까지 몇 년 지났으면 예상낙찰가가 그만큼 빗나간다.
+// (실측: 2023타경109238은 가격시점 2023.07.14인데 매각기일이 2026.10.01 — 3년 차이)
+async function fetchAppraisal(cookie, csNo, courtCode) {
+  try {
+    const r = await fetch(BASE + APPRAISAL_PATH, {
+      method: "POST",
+      headers: {
+        ...browserHeaders(),
+        "Content-Type": "application/json;charset=UTF-8",
+        Referer: BASE + "/pgj/index.on?w2xPath=/pgj/ui/pgj100/PGJ15BP03.xml",
+        "SC-Userid": "SYSTEM",
+        "SC-Pgmid": "PGJ15BP03",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        dma_srchAeeWevl: {
+          cortOfcCd: courtCode, csNo, ordTsCnt: "1",
+          pgmId: "PGJ15BP03", srchInfo: {},
+        },
+      }),
+    });
+    if (r.status !== 200) return null;
+    const a = (await r.json())?.data?.dma_ordTsIndvdAeeWevlInf;
+    if (!a || !a.dspslPrcCrtrYmd) return null;
+    return {
+      priceBaseDate: a.dspslPrcCrtrYmd || "",   // 가격시점 (감정가 기준일)
+      surveyDate: a.exmnYmd || "",
+      writeDate: a.wrtYmd || "",
+      appraiser: a.aeeEvlExamrNm || "",
+      reportNo: a.aeeWevlNo || "",
     };
   } catch { return null; }
 }
@@ -351,6 +402,7 @@ export default async function handler(req, res) {
     const courtCode = head.boCd || lots[0]?.courtCode;
     const survey = await fetchSurvey(cookie, csNo, courtCode);
     const caseInfo = await fetchParties(cookie, csNo, courtCode);
+    const appraisal = await fetchAppraisal(cookie, csNo, courtCode);
 
     // 매물마다 사건상세를 붙인다(선순위·청구금액·명세서 비고). 실패해도 기본 정보는 살린다.
     for (const lot of lots) {
@@ -371,6 +423,7 @@ export default async function handler(req, res) {
       objectCount: uniq.length,
       survey,
       caseInfo,
+      appraisal,
       lots,
     });
   } catch (e) {

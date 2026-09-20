@@ -206,6 +206,13 @@ function opposability(moveIn, seniorDate) {
   return { known: true, assume: a < b, moveIn: a, senior: b };
 }
 // 조세채권 성격의 이해관계인 — 당해세는 근저당보다 먼저 배당된다.
+// 가격시점(감정가 기준일)과 매각기일 사이 개월 수. 오래될수록 예상낙찰가가 빗나간다.
+function monthsBetween(ymdA, ymdB) {
+  const p = (v) => { const s = String(v || ""); return s.length === 8 ? new Date(+s.slice(0,4), +s.slice(4,6)-1, +s.slice(6)) : null; };
+  const a = p(ymdA), b = p(ymdB);
+  if (!a || !b) return null;
+  return Math.round((b - a) / (1000 * 60 * 60 * 24 * 30.44));
+}
 const TAX_PARTY = new Set(["교부권자", "압류권자"]);
 const ymdLabel = (v) => { const s = String(v || ""); return s.length === 8 ? `${s.slice(0,4)}.${s.slice(4,6)}.${s.slice(6)}` : s; };
 
@@ -851,10 +858,40 @@ export default function App() {
               </div>
             </div>
 
+            {cData.appraisal && (
+              <div className="appraisal">
+                <span className="ap-label">감정평가</span>
+                가격시점 <b>{ymdLabel(cData.appraisal.priceBaseDate)}</b>
+                {cData.appraisal.appraiser ? ` · 평가사 ${cData.appraisal.appraiser}` : ""}
+                {cData.appraisal.reportNo ? ` · ${cData.appraisal.reportNo}` : ""}
+                {(() => {
+                  const m = monthsBetween(cData.appraisal.priceBaseDate, cData.lots[0]?.saleDate);
+                  if (m == null || m < 18) return null;
+                  return (
+                    <div className="ap-warn">
+                      감정가는 {ymdLabel(cData.appraisal.priceBaseDate)} 시세입니다.
+                      매각기일까지 <b>{Math.floor(m / 12)}년 {m % 12}개월</b> 차이가 나므로
+                      그 사이 시세 변동만큼 예상낙찰가가 빗나갑니다.
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+
             {/* 이해관계인 — 권리 구조 */}
             {cData.caseInfo?.partyCount > 0 && (
               <div className="parties">
                 <div className="pt-head">이해관계인 {cData.caseInfo.partyCount}명</div>
+                {cData.caseInfo.applicant && (
+                  <div className="pt-applicant">
+                    경매신청자 <b>{cData.caseInfo.applicant.name}</b>
+                    {cData.lots.find((l) => l.claimAmount > 0)
+                      ? ` · 청구금액 ${fmtEok(cData.lots.find((l) => l.claimAmount > 0).claimAmount)}억` : ""}
+                    {cData.caseInfo.applicantNameInTenants && (
+                      <span className="pt-hint"> · 임차인 목록에도 같은 이름이 있습니다 — 보증금 회수 목적일 수 있으나 이름이 마스킹돼 동일인 확인은 필요합니다</span>
+                    )}
+                  </div>
+                )}
                 <div className="pt-chips">
                   {cData.caseInfo.parties.map((p) => (
                     <span key={p.type} className={`pt-chip${TAX_PARTY.has(p.type) ? " tax" : ""}`}>
