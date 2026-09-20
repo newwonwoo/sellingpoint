@@ -336,3 +336,28 @@ tr.bad td { background: #fef4f3 !important; }
 .ap-label { display: inline-block; font-size: 11px; font-weight: 700; color: var(--muted); margin-right: 8px; }
 .appraisal b { font-family: var(--mono); }
 .ap-warn { margin-top: 8px; padding: 8px 11px; border-radius: 7px; background: #fffbeb; border: 1px solid #fde68a; color: #8A5200; }
+
+/* ── 엑셀 일괄분석 ── */
+.batch { display: block; }
+.bx-steps { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+.bx-steps span { flex: 1 1 180px; padding: 8px 12px; background: #f1f5f9; border: 1px solid var(--line); border-radius: 7px; font-size: 12.5px; color: #3b4759; }
+.bx-steps b { display: inline-block; width: 17px; height: 17px; line-height: 17px; text-align: center; border-radius: 50%; background: var(--brand, #0C6B58); color: #fff; font-size: 11px; margin-right: 7px; }
+.bx-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; }
+.bx-file { flex: 1 1 280px; position: relative; display: flex; align-items: center; padding: 0 14px; min-height: 40px; background: #fff; border: 1px dashed #9fb3c8; border-radius: 8px; cursor: pointer; }
+.bx-file:hover { border-color: var(--brand, #0C6B58); }
+.bx-file input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
+.bx-file span { font-size: 13px; color: #3b4759; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bx-hint { margin-top: 9px; font-size: 12.5px; color: var(--muted); }
+.bx-link { margin-left: 8px; padding: 3px 10px; font-size: 12px; background: #fff; border: 1px solid var(--line); border-radius: 6px; color: #0C6B58; cursor: pointer; }
+.bx-link:hover { background: #f1f5f9; }
+.bx-prog { margin-top: 12px; }
+.bx-bar { height: 8px; border-radius: 999px; background: #e8eef5; overflow: hidden; }
+.bx-bar i { display: block; height: 100%; background: #0C6B58; transition: width .25s ease; }
+.bx-prog-t { margin-top: 6px; font-size: 12px; color: var(--muted); font-family: var(--mono); }
+.bx-done { margin-top: 12px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
+.bx-done span { font-size: 12.5px; color: var(--muted); }
+.bx-cols { margin-top: 14px; padding: 11px 14px; background: #fff; border: 1px solid var(--line); border-radius: 9px; }
+.bx-cols-t { font-size: 11.5px; font-weight: 700; color: var(--muted); margin-bottom: 8px; }
+.bx-cols-l { display: flex; flex-wrap: wrap; gap: 5px; }
+.bx-cols-l span { padding: 3px 9px; border-radius: 999px; background: #f1f5f9; border: 1px solid var(--line); font-size: 11.5px; color: #3b4759; }
+.bx-warn { margin-top: 12px; padding: 10px 13px; border-radius: 8px; background: #fffbeb; border: 1px solid #fde68a; color: #8A5200; font-size: 12.5px; line-height: 1.55; }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import * as XLSX from "xlsx-js-style";
 import JSZip from "jszip";
 import regions from "./regions.json";
@@ -6,6 +6,11 @@ import { routeInput } from "./registry";
 import { courtSggCodes, dedupeSggOptions } from "./courtCodes";
 import { groupRows, matchUsageRow } from "./statsModel.js";
 import { bucketMonth, categoriesOf, findWindows, monthRange, referenceGrid, shiftYM } from "./backtrack.js";
+import {
+  benefitOf, extractAmounts, monthsBetween, num, opposability,
+  scopeTenants, TAX_PARTY, VERDICT_LABEL, ymdLabel,
+} from "./caseModel.js";
+import { buildResultBook, buildTemplateBook, caseRows, failRow, MAX_CASES, OUT_COLS, readCaseInputs, saveBook } from "./caseSheet.js";
 
 const YEARS = Array.from({ length: 12 }, (_, i) => 2026 - i);
 const MONTHS = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0"));
@@ -66,7 +71,6 @@ function loadCourtSggList(sidoCode) {
   p.then((list) => { if (!list.length) sggListCache.delete(sidoCode); }); // 실패는 캐시하지 않음
   return p;
 }
-const num = (v) => { const n = Number(v); return Number.isFinite(n) ? n : 0; };
 const fmtInt = (v) => num(v).toLocaleString();
 const fmtEok = (v) => { const n = num(v) / 1e8; return (n >= 100 ? Math.round(n) : Number(n.toFixed(1))).toLocaleString(); };
 const fmtRate = (v) => (num(v) ? num(v).toFixed(1) : "-");
@@ -153,6 +157,7 @@ const ymLabel = (ym) => `${String(ym).slice(0, 4)}.${String(ym).slice(4)}`;
 const TABS = [
   { key: "stats", label: "낙찰가율 조회" },
   { key: "case", label: "사건번호 실익" },
+  { key: "batch", label: "엑셀 일괄분석" },
   { key: "tools", label: "역추적(진단)" },
 ];
 const initialTab = () => {
@@ -160,61 +165,8 @@ const initialTab = () => {
   const h = String(window.location.hash || "").replace(/^#\/?/, "");
   return TABS.some((t) => t.key === h) ? h : "stats";
 };
-// 인수권리 문장에서 금액을 뽑는다. 예: "임대차보증금 368,000,000원" → 368000000
-// 낙찰자가 떠안는 금액이라 예상낙찰가에서 빼야 배당재원이 나온다.
-function extractAmounts(text) {
-  const out = [];
-  for (const m of String(text || "").matchAll(/([0-9][0-9,]{5,})\s*원/g)) {
-    const v = Number(m[1].replace(/,/g, ""));
-    if (Number.isFinite(v) && v > 0) out.push(v);
-  }
-  return out;
-}
-
-// 실익 계산 — 폭포수.
-//   예상낙찰가 − 인수권리 − 집행비용 = 배당재원
-//   배당재원 − 선순위채권 = 우리 배당가능액
-// 인수권리는 낙찰자가 떠안으므로 그만큼 낮게 응찰한다. 배당에도 들어가지 않는다.
-function benefitOf({ expected, assumed, cost, senior, claim }) {
-  const E = num(expected), A = num(assumed), C = num(cost), S = num(senior), K = num(claim);
-  const pool = Math.max(0, E - A - C);          // 배당재원
-  const ours = Math.max(0, pool - S);           // 우리 순위까지 내려온 금액
-  // 배당은 채권액 한도까지만 받는다. 남는 건 후순위·채무자 몫이라 우리 회수액이 아니다.
-  const recovered = K > 0 ? Math.min(ours, K) : ours;
-  const rate = K > 0 ? (recovered / K) * 100 : null;
-  const verdict = !E ? "unknown"
-    : ours <= 0 ? "none"        // 배당가능액이 0이면 채권액과 무관하게 실익 없음
-      : K <= 0 ? "needclaim"
-        : ours >= K ? "full" : "partial";
-  return { E, A, C, S, K, pool, ours, recovered, rate, verdict };
-}
-const VERDICT_LABEL = {
-  none: "실익 없음", partial: "일부 회수", full: "전액 회수 가능",
-  needclaim: "우리 채권액을 입력하세요", unknown: "판단 불가",
-};
-// "2023.10.12.가압류" / "2023. 7. 3. 강제경매개시결정" → Date. 못 읽으면 null.
-function parseKoDate(text) {
-  const m = /(\d{4})\s*[.\-년]\s*(\d{1,2})\s*[.\-월]\s*(\d{1,2})/.exec(String(text || ""));
-  if (!m) return null;
-  const d = new Date(+m[1], +m[2] - 1, +m[3]);
-  return Number.isNaN(d.getTime()) ? null : d;
-}
-// 대항력 판정 — 전입일이 최선순위 설정일자보다 앞서면 낙찰자가 인수한다.
-function opposability(moveIn, seniorDate) {
-  const a = parseKoDate(moveIn), b = parseKoDate(seniorDate);
-  if (!a || !b) return { known: false };
-  return { known: true, assume: a < b, moveIn: a, senior: b };
-}
-// 조세채권 성격의 이해관계인 — 당해세는 근저당보다 먼저 배당된다.
-// 가격시점(감정가 기준일)과 매각기일 사이 개월 수. 오래될수록 예상낙찰가가 빗나간다.
-function monthsBetween(ymdA, ymdB) {
-  const p = (v) => { const s = String(v || ""); return s.length === 8 ? new Date(+s.slice(0,4), +s.slice(4,6)-1, +s.slice(6)) : null; };
-  const a = p(ymdA), b = p(ymdB);
-  if (!a || !b) return null;
-  return Math.round((b - a) / (1000 * 60 * 60 * 24 * 30.44));
-}
-const TAX_PARTY = new Set(["교부권자", "압류권자"]);
-const ymdLabel = (v) => { const s = String(v || ""); return s.length === 8 ? `${s.slice(0,4)}.${s.slice(4,6)}.${s.slice(6)}` : s; };
+// 실익 계산·대항력 판정·이해관계인 분류는 src/caseModel.js 로 옮겼다.
+// 엑셀 일괄분석이 같은 계산을 써야 하기 때문 — 화면 판정과 파일 판정이 다르면 그게 사고다.
 
 // ── 2차 MVP: 주소 → 시군구 로컬 파싱 (외부 API 키 불필요) ──
 // 시도 별칭(신·구 명칭 모두) → regions.json 시도코드. 긴 별칭 먼저 매칭.
@@ -270,6 +222,62 @@ function useOptions(rows) {
   for (const r of rows || []) { const n = r.lclDspslGdsLstUsgNm; if (!n || n === "소계" || seen.has(n)) continue; seen.add(n); out.push(n); }
   return out;
 }
+
+// ── 사건 조회 공용 경로 ──
+// 화면(한 건)과 엑셀 일괄분석(수백 건)이 같은 함수를 쓴다. 갈라놓으면 둘 중 하나만
+// 고쳐지는 사고가 난다.
+
+// 낙찰가율 한 건. 같은 (시도·시군구·기간)은 캐시에서 꺼내 쓴다.
+// ⚠ 일괄분석에서 같은 구의 사건이 수십 건씩 몰린다. 이 캐시가 없으면 사건 수만큼
+//   매각통계를 다시 부르게 된다(같은 답을 받으려고). 캐시 크기는 '구 개수'로 묶인다.
+async function resolveRate(lot, startYM, endYM, cache) {
+  let codes = [];
+  try {
+    const list = await loadCourtSggList(lot.sidoCode);
+    codes = courtSggCodes(lot.sigungu, lot.sigunguCode, list);
+  } catch { /* 목록 실패 — 아래에서 빈 코드로 조회해 전국값이라도 받는다 */ }
+  const key = `${lot.sidoCode}|${codes.join("+")}|${startYM}-${endYM}`;
+  let rowsP = cache.get(key);
+  if (!rowsP) {
+    rowsP = (async () => {
+      const rs = await fetch("/api/court-stats", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sidoCode: lot.sidoCode, sigunguCodes: codes, startYM, endYM }),
+      });
+      if (!rs.ok) return null;
+      return findRows(await rs.json());
+    })().catch(() => null);
+    cache.set(key, rowsP);
+  }
+  const rows = await rowsP;
+  if (!rows) return { rate: 0, matched: "-", exact: false };
+  const m = matchUsageRow(rows, lot.usage);
+  return { rate: num(m.row?.dspslAmtRate), matched: m.matched, exact: m.exact };
+}
+
+// 사건 한 건: 법원 조회 + 매물별 낙찰가율 → 예상낙찰가까지 채운 응답.
+// lots 를 새 배열에 담지 않고 제자리에서 바꾼다(수백 건을 돌 때 사본을 두 벌 들지 않으려고).
+async function fetchCaseAnalyzed(caseNo, startYM, endYM, rateCache, signal) {
+  const r = await fetch("/api/court-case", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ caseNo }), signal,
+  });
+  const data = await r.json();
+  if (!r.ok) throw new Error([data.error, data.hint].filter(Boolean).join(" — ") || `조회 실패 (${r.status})`);
+  if (!data.lots?.length) {
+    throw new Error("물건을 찾지 못했습니다. 사건번호를 확인해주세요. (기일이 지났거나 취하·종결된 사건은 조회되지 않습니다)");
+  }
+  for (const lot of data.lots) {
+    const rr = await resolveRate(lot, startYM, endYM, rateCache);
+    lot.rate = rr.rate; lot.matched = rr.matched; lot.exact = rr.exact;
+    lot.expected = lot.appraisal * rr.rate / 100;
+  }
+  return data;
+}
+
+// 일괄분석 동시 실행 수. 법원 서버 부담과 '동시에 떠 있는 응답 개수'를 같이 누른다.
+// 응답 한 건이 명세서 비고·감정평가 요점까지 달고 와서 작지 않다.
+const BATCH_CONCURRENCY = 3;
 
 export default function App() {
   const now = new Date();
@@ -328,6 +336,19 @@ export default function App() {
   const [cCalc, setCCalc] = useState({});
   const setCalcField = (lotNo, field, v) =>
     setCCalc((prev) => ({ ...prev, [lotNo]: { ...(prev[lotNo] || {}), [field]: v } }));
+  // 임차인을 매물별로 가른 결과(사건 단위 현황조사서 → 매물별). cData 가 바뀔 때만 다시 계산.
+  const tenantScopes = useMemo(() => (cData ? scopeTenants(cData) : []), [cData]);
+
+  // ── 엑셀 일괄분석 상태 ──
+  // bRows 는 '접힌 결과'(칼럼 배열)만 들고 있다. 조회 응답 원본은 한 건씩 버린다.
+  const [bFile, setBFile] = useState(null);
+  const [bBusy, setBBusy] = useState(false);
+  const [bErr, setBErr] = useState("");
+  const [bMsg, setBMsg] = useState("");
+  const [bProg, setBProg] = useState(null);     // { done, total, fail }
+  const [bRows, setBRows] = useState(null);     // 결과 행(배열의 배열)
+  const [bMeta, setBMeta] = useState(null);
+  const bCancel = useRef({ stop: false });
 
   // ── 낙찰가율 역추적 상태 ──
   const [btSido, setBtSido] = useState("11");
@@ -367,6 +388,13 @@ export default function App() {
     () => (sigungu ? sigunguOptions.find((g) => g.code === sigungu)?.codes || sigungu.split(",") : []),
     [sigungu, sigunguOptions],
   );
+
+  // 낙찰가율 기준기간 — '최근 1년'(지난달 기준 12개월) 고정. 화면·엑셀이 같은 기간을 쓴다.
+  const ratePeriod = () => {
+    const endYM = `${_lastE.getFullYear()}${_p2(_lastE.getMonth() + 1)}`;
+    return { startYM: shiftYM(endYM, -11), endYM };
+  };
+
   // 역추적 섹션의 시군구 목록 (메인 조회와 독립적으로 고를 수 있어야 해서 따로 둔다)
   useEffect(() => {
     setBtSgg(""); setBtSgList(null);
@@ -661,46 +689,93 @@ export default function App() {
     if (!no) { setCErr("사건번호를 입력하세요 (예: 2024타경115858)"); return; }
     setCBusy(true); setCErr(""); setCData(null); setCCalc({});
     try {
-      const r = await fetch("/api/court-case", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ caseNo: no }),
-      });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || `조회 실패 (${r.status})`);
-      if (!data.lots?.length) {
-        throw new Error("이 사건의 물건을 찾지 못했습니다. 사건번호를 확인해주세요. (기일이 취소·변경된 사건은 조회되지 않는 경우가 있습니다)");
-      }
-      // 낙찰가율은 '최근 1년'(지난달 기준 12개월)으로 고정
-      const endYM = `${_lastE.getFullYear()}${_p2(_lastE.getMonth() + 1)}`;
-      const startYM = shiftYM(endYM, -11);
-      const lots = [];
-      for (const lot of data.lots) {
-        let rate = 0, matched = "-", exact = false;
-        try {
-          const list = await loadCourtSggList(lot.sidoCode);
-          const codes = courtSggCodes(lot.sigungu, lot.sigunguCode, list);
-          const rs = await fetch("/api/court-stats", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ sidoCode: lot.sidoCode, sigunguCodes: codes, startYM, endYM }),
-          });
-          const sd = await rs.json();
-          if (rs.ok) {
-            const m = matchUsageRow(findRows(sd), lot.usage);
-            rate = num(m.row?.dspslAmtRate); matched = m.matched; exact = m.exact;
-          }
-        } catch { /* 낙찰가율만 실패해도 감정가·최저가는 보여준다 */ }
-        lots.push({ ...lot, rate, matched, exact, expected: lot.appraisal * rate / 100 });
-      }
+      const { startYM, endYM } = ratePeriod();
+      const data = await fetchCaseAnalyzed(no, startYM, endYM, new Map());
       // 인수권리 문장에 금액이 적혀 있으면 미리 채워둔다(사용자가 고칠 수 있게).
       const prefill = {};
-      for (const lot of lots) {
+      for (const lot of data.lots) {
         const amts = extractAmounts(lot.assumedRights);
         if (amts.length) prefill[lot.lotNo] = { assumed: String(Math.max(...amts)) };
       }
       setCCalc(prefill);
-      setCData({ ...data, lots, period: `${ymLabel(startYM)}~${ymLabel(endYM)}` });
+      setCData({ ...data, period: `${ymLabel(startYM)}~${ymLabel(endYM)}` });
     } catch (e) { setCErr(String(e.message || e)); }
     finally { setCBusy(false); }
+  }
+
+  // ── 엑셀 일괄 실익분석 ──
+  // 사건번호가 적힌 엑셀 → 사건마다 조회 → 매물 한 줄씩 칼럼화 → 엑셀 다운로드.
+  //
+  // 메모리: 조회 응답은 한 건씩 '행'으로 접고 바로 버린다. 수백 건 응답을 모아뒀다가
+  // 마지막에 한꺼번에 변환하면 (응답 원본 + 변환 결과)를 동시에 들게 된다.
+  const stamp = () => {
+    const d = new Date();
+    return `${d.getFullYear()}${_p2(d.getMonth() + 1)}${_p2(d.getDate())}_${_p2(d.getHours())}${_p2(d.getMinutes())}`;
+  };
+  function saveBatch(rows, meta) {
+    saveBook(buildResultBook(rows, meta), `실익분석_${rows.length}건_${stamp()}.xlsx`);
+  }
+
+  async function runBatch() {
+    if (!bFile || bBusy) return;
+    setBBusy(true); setBErr(""); setBMsg("파일 읽는 중…"); setBProg(null); setBRows(null); setBMeta(null);
+    bCancel.current = { stop: false };
+    const cancel = bCancel.current;
+    try {
+      // 업로드 워크북은 사건번호를 뽑는 즉시 버린다(readCaseInputs 안에서 끝난다).
+      const parsed = readCaseInputs(await bFile.arrayBuffer());
+      const items = parsed.items;
+      if (!items.length) {
+        throw new Error("사건번호를 찾지 못했습니다. '사건번호' 칼럼이 있는지, 값이 '2024타경115858' 형식인지 확인해주세요.");
+      }
+      if (items.length > MAX_CASES) {
+        throw new Error(`사건이 ${items.length}건입니다. 한 번에 ${MAX_CASES}건까지만 처리합니다 — 파일을 나눠 올려주세요.`);
+      }
+
+      const { startYM, endYM } = ratePeriod();
+      const rateCache = new Map();
+      const chunks = new Array(items.length);   // 업로드 순서를 지켜야 원본과 대사가 된다
+      let done = 0, fail = 0, next = 0;
+
+      const worker = async () => {
+        while (next < items.length && !cancel.stop) {
+          const i = next++;
+          const it = items[i];
+          try {
+            const data = await fetchCaseAnalyzed(it.caseNo, startYM, endYM, rateCache);
+            chunks[i] = caseRows(data, it);     // 여기서 응답을 행으로 접고
+          } catch (e) {                          // data 참조가 끊긴다 → 다음 건 전에 회수된다
+            fail++;
+            chunks[i] = [failRow(it.caseNo, it, String(e.message || e))];
+          }
+          done++;
+          setBProg({ done, total: items.length, fail });
+        }
+      };
+      setBMsg(`${items.length}건 조회 중…`);
+      await Promise.all(Array.from({ length: BATCH_CONCURRENCY }, worker));
+
+      const rows = [];
+      for (const chunk of chunks) if (chunk) rows.push(...chunk);
+      if (!rows.length) throw new Error("결과가 비었습니다.");
+
+      const meta = {
+        createdAt: new Date().toLocaleString("ko-KR"),
+        period: `${ymLabel(startYM)}~${ymLabel(endYM)} (최근 1년)`,
+        caseCount: items.length, rowCount: rows.length, failCount: fail,
+      };
+      setBRows(rows); setBMeta(meta);
+      saveBatch(rows, meta);                     // 완료되면 바로 내려받는다
+      const skipped = cancel.stop ? items.length - done : 0;
+      setBMsg(
+        `완료 · 사건 ${done}건 / 결과 ${rows.length}행` +
+        (fail ? ` · 조회 실패 ${fail}건(파일에 사유가 적힙니다)` : "") +
+        (skipped ? ` · 중지로 건너뛴 ${skipped}건` : "") +
+        (parsed.stats.dupes ? ` · 중복 사건번호 ${parsed.stats.dupes}건 제외` : "") +
+        (parsed.stats.mode === "scan" ? " · 사건번호 칼럼을 못 찾아 시트 전체에서 주워 담았습니다(채권액 등 부가 칼럼 미적용)" : ""),
+      );
+    } catch (e) { setBErr(String(e.message || e)); setBMsg(""); }
+    finally { setBBusy(false); }
   }
 
   // ── 낙찰가율 역추적 ──
@@ -857,6 +932,12 @@ export default function App() {
                 {` · 매물 ${cData.lots.length}건 / 목적물 ${cData.objectCount}건`}
               </div>
             </div>
+            {cData.courtConflict && (
+              <div className="lot-warn">
+                같은 사건번호가 <b>여러 법원</b>에 있습니다 ({cData.court}). 사건번호의 연도·일련번호는 법원별로 따로 돌아가므로
+                아래 매물에 다른 법원 사건이 섞여 있습니다 — 법원을 확인하고 해당 매물만 보세요.
+              </div>
+            )}
 
             {cData.appraisal && (
               <div className="appraisal">
@@ -941,10 +1022,13 @@ export default function App() {
               </div>
             )}
 
-            {cData.lots.map((lot) => {
+            {cData.lots.map((lot, lotIdx) => {
               const o = lot.objects[0] || {};
               const band = lot.rate >= 100 ? "hi" : lot.rate >= 80 ? "mid" : lot.rate > 0 ? "lo" : "na";
               const vsMin = lot.minPrice ? (lot.expected / lot.minPrice - 1) * 100 : null;
+              // 이 매물의 임차인만. 사건 전체를 그대로 뿌리면 남의 물건 임차인이
+              // 이 매물의 최선순위와 비교돼 '인수'로 잡힌다.
+              const tn = tenantScopes[lotIdx] || { list: [], scoped: true };
               return (
                 <div key={lot.lotNo} className={`lot ${band}`}>
                   <div className="lot-addr">
@@ -1065,18 +1149,24 @@ export default function App() {
                   })()}
 
                   {/* 현황조사서 임차인 — 대항력 자동 판정 */}
-                  {cData.survey && (cData.survey.tenants.length > 0 || cData.survey.possessions.length > 0) && (
+                  {cData.survey && (tn.list.length > 0 || cData.survey.possessions.length > 0) && (
                     <div className="tenants">
                       <div className="tn-head">
                         현황조사서
                         {cData.survey.receivedDate ? ` · 접수 ${ymdLabel(cData.survey.receivedDate)}` : ""}
-                        {` · 임차인 ${cData.survey.tenants.length}명`}
+                        {` · 임차인 ${tn.list.length}명`}
                       </div>
-                      {cData.survey.tenants.length > 0 ? (
+                      {!tn.scoped && tn.list.length > 0 && (
+                        <div className="tn-warn">
+                          이 사건은 매물이 {cData.lots.length}건인데 현황조사서의 임차인이 어느 매물 것인지 구분되지 않습니다.
+                          아래 목록은 <b>사건 전체</b>의 임차인이라 이 매물과 무관한 사람이 섞여 있을 수 있습니다.
+                        </div>
+                      )}
+                      {tn.list.length > 0 ? (
                         <table className="tn-table">
                           <thead><tr><th className="left">전입일</th><th className="left">임차부분</th><th className="left">보증금</th><th className="left">확정일자</th><th className="left">대항력</th></tr></thead>
                           <tbody>
-                            {cData.survey.tenants.map((t, i) => {
+                            {tn.list.map((t, i) => {
                               const o = opposability(t.moveIn, lot.seniorDate);
                               return (
                                 <tr key={i}>
@@ -1097,7 +1187,7 @@ export default function App() {
                       ) : (
                         <div className="tn-none">전입세대 등재된 임차인이 없습니다.</div>
                       )}
-                      {cData.survey.tenants.some((t) => opposability(t.moveIn, lot.seniorDate).assume) && (
+                      {tn.list.some((t) => opposability(t.moveIn, lot.seniorDate).assume) && (
                         <div className="tn-warn">
                           최선순위 설정일자({lot.seniorDate})보다 먼저 전입한 임차인이 있습니다.
                           배당에서 보증금을 다 못 받으면 낙찰자가 인수하므로 그만큼 낙찰가가 낮아집니다.
@@ -1149,6 +1239,73 @@ export default function App() {
             <div className="ar-note">※ 예상낙찰가 = 법원 감정가 × 해당 시군구·용도 매각가율(최근 1년 금액가중). 최선순위 설정일자·인수권리는 매각물건명세서에서 가져온 값이며, 임차인 개별 현황과 집행비용은 반영되지 않습니다.</div>
           </div>
         )}
+      </section>
+
+      </>)}
+
+      {tab === "batch" && (<>
+      <div className="section-div">엑셀로 여러 사건 한꺼번에</div>
+
+      <section className="panel batch">
+        <div className="bx-steps">
+          <span><b>1</b> 사건번호가 적힌 엑셀 올리기</span>
+          <span><b>2</b> 사건마다 법원 조회</span>
+          <span><b>3</b> 칼럼으로 정리된 엑셀 받기</span>
+        </div>
+
+        <div className="bx-row">
+          <label className="bx-file">
+            <input type="file" accept=".xlsx,.xls,.csv"
+              onChange={(e) => { setBFile(e.target.files?.[0] || null); setBErr(""); setBMsg(""); setBRows(null); }} />
+            <span>{bFile ? bFile.name : "엑셀 파일 선택 (.xlsx · .xls · .csv)"}</span>
+          </label>
+          <button className="go" onClick={runBatch} disabled={!bFile || bBusy}>
+            {bBusy ? "분석 중…" : "일괄 분석"}
+          </button>
+          {bBusy && (
+            <button className="csv" onClick={() => { bCancel.current.stop = true; setBMsg("중지하는 중… 지금까지 받은 건까지 저장합니다"); }}>
+              중지
+            </button>
+          )}
+        </div>
+
+        <div className="bx-hint">
+          사건번호만 있으면 됩니다. <b>우리채권액 · 선순위채권 · 집행비용</b> 칼럼이 같이 있으면 실익까지 판정해 채웁니다.
+          <button className="bx-link" onClick={() => saveBook(buildTemplateBook(), "실익분석_업로드양식.xlsx")}>업로드 양식 받기</button>
+        </div>
+
+        {bErr && <div className="status err">{bErr}</div>}
+
+        {bProg && (
+          <div className="bx-prog">
+            <div className="bx-bar"><i style={{ width: `${Math.round(bProg.done / bProg.total * 100)}%` }} /></div>
+            <div className="bx-prog-t">
+              {bProg.done} / {bProg.total} 사건
+              {bProg.fail ? ` · 실패 ${bProg.fail}` : ""}
+              {bBusy ? " · 건당 3~8초 걸립니다" : ""}
+            </div>
+          </div>
+        )}
+
+        {bMsg && <div className="status">{bMsg}</div>}
+
+        {bRows && !bBusy && (
+          <div className="bx-done">
+            <button className="go alt" onClick={() => saveBatch(bRows, bMeta)}>엑셀 다시 받기</button>
+            <span>{bRows.length}행 · {OUT_COLS.length}개 칼럼 · 시트 2개(실익분석 / 분석조건)</span>
+          </div>
+        )}
+
+        <div className="bx-cols">
+          <div className="bx-cols-t">결과 칼럼 {OUT_COLS.length}개</div>
+          <div className="bx-cols-l">{OUT_COLS.map((c) => <span key={c.label}>{c.label}</span>)}</div>
+        </div>
+
+        <div className="bx-warn">
+          <b>계산에 들어가지 않는 값</b> — 선순위채권과 집행비용은 법원이 공개하지 않습니다.
+          업로드 시트에 적어 오지 않으면 <b>0으로 계산돼 실익이 과대평가</b>됩니다.
+          조세채권(교부권자·압류권자)도 건수만 나오고 금액은 알 수 없어 계산에서 빠집니다.
+        </div>
       </section>
 
       </>)}
