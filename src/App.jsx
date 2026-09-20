@@ -4,7 +4,7 @@ import JSZip from "jszip";
 import regions from "./regions.json";
 import { routeInput } from "./registry";
 import { courtSggCodes, dedupeSggOptions } from "./courtCodes";
-import { groupRows } from "./statsModel.js";
+import { groupRows, matchUsageRow } from "./statsModel.js";
 import { bucketMonth, categoriesOf, findWindows, monthRange, referenceGrid, shiftYM } from "./backtrack.js";
 
 const YEARS = Array.from({ length: 12 }, (_, i) => 2026 - i);
@@ -147,6 +147,74 @@ function checkRow(r) {
 }
 const isSubtotal = (name) => name === "소계" || name === "전체";
 const ymLabel = (ym) => `${String(ym).slice(0, 4)}.${String(ym).slice(4)}`;
+// 화면 탭 — 가동중 화면(조회)은 그대로 두고 새 기능은 탭으로 분리한다.
+// tools(역추적)는 74% 정체를 파려고 만든 진단 도구라 평소엔 숨기고,
+// 주소에 #tools 를 붙였을 때만 탭이 나타난다.
+const TABS = [
+  { key: "stats", label: "낙찰가율 조회" },
+  { key: "case", label: "사건번호 실익" },
+  { key: "tools", label: "역추적(진단)" },
+];
+const initialTab = () => {
+  if (typeof window === "undefined") return "stats";
+  const h = String(window.location.hash || "").replace(/^#\/?/, "");
+  return TABS.some((t) => t.key === h) ? h : "stats";
+};
+// 인수권리 문장에서 금액을 뽑는다. 예: "임대차보증금 368,000,000원" → 368000000
+// 낙찰자가 떠안는 금액이라 예상낙찰가에서 빼야 배당재원이 나온다.
+function extractAmounts(text) {
+  const out = [];
+  for (const m of String(text || "").matchAll(/([0-9][0-9,]{5,})\s*원/g)) {
+    const v = Number(m[1].replace(/,/g, ""));
+    if (Number.isFinite(v) && v > 0) out.push(v);
+  }
+  return out;
+}
+
+// 실익 계산 — 폭포수.
+//   예상낙찰가 − 인수권리 − 집행비용 = 배당재원
+//   배당재원 − 선순위채권 = 우리 배당가능액
+// 인수권리는 낙찰자가 떠안으므로 그만큼 낮게 응찰한다. 배당에도 들어가지 않는다.
+function benefitOf({ expected, assumed, cost, senior, claim }) {
+  const E = num(expected), A = num(assumed), C = num(cost), S = num(senior), K = num(claim);
+  const pool = Math.max(0, E - A - C);          // 배당재원
+  const ours = Math.max(0, pool - S);           // 우리 순위까지 내려온 금액
+  // 배당은 채권액 한도까지만 받는다. 남는 건 후순위·채무자 몫이라 우리 회수액이 아니다.
+  const recovered = K > 0 ? Math.min(ours, K) : ours;
+  const rate = K > 0 ? (recovered / K) * 100 : null;
+  const verdict = !E ? "unknown"
+    : ours <= 0 ? "none"        // 배당가능액이 0이면 채권액과 무관하게 실익 없음
+      : K <= 0 ? "needclaim"
+        : ours >= K ? "full" : "partial";
+  return { E, A, C, S, K, pool, ours, recovered, rate, verdict };
+}
+const VERDICT_LABEL = {
+  none: "실익 없음", partial: "일부 회수", full: "전액 회수 가능",
+  needclaim: "우리 채권액을 입력하세요", unknown: "판단 불가",
+};
+// "2023.10.12.가압류" / "2023. 7. 3. 강제경매개시결정" → Date. 못 읽으면 null.
+function parseKoDate(text) {
+  const m = /(\d{4})\s*[.\-년]\s*(\d{1,2})\s*[.\-월]\s*(\d{1,2})/.exec(String(text || ""));
+  if (!m) return null;
+  const d = new Date(+m[1], +m[2] - 1, +m[3]);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+// 대항력 판정 — 전입일이 최선순위 설정일자보다 앞서면 낙찰자가 인수한다.
+function opposability(moveIn, seniorDate) {
+  const a = parseKoDate(moveIn), b = parseKoDate(seniorDate);
+  if (!a || !b) return { known: false };
+  return { known: true, assume: a < b, moveIn: a, senior: b };
+}
+// 조세채권 성격의 이해관계인 — 당해세는 근저당보다 먼저 배당된다.
+// 가격시점(감정가 기준일)과 매각기일 사이 개월 수. 오래될수록 예상낙찰가가 빗나간다.
+function monthsBetween(ymdA, ymdB) {
+  const p = (v) => { const s = String(v || ""); return s.length === 8 ? new Date(+s.slice(0,4), +s.slice(4,6)-1, +s.slice(6)) : null; };
+  const a = p(ymdA), b = p(ymdB);
+  if (!a || !b) return null;
+  return Math.round((b - a) / (1000 * 60 * 60 * 24 * 30.44));
+}
+const TAX_PARTY = new Set(["교부권자", "압류권자"]);
+const ymdLabel = (v) => { const s = String(v || ""); return s.length === 8 ? `${s.slice(0,4)}.${s.slice(4,6)}.${s.slice(6)}` : s; };
 
 // ── 2차 MVP: 주소 → 시군구 로컬 파싱 (외부 API 키 불필요) ──
 // 시도 별칭(신·구 명칭 모두) → regions.json 시도코드. 긴 별칭 먼저 매칭.
@@ -234,6 +302,32 @@ export default function App() {
   const [aMsg, setAMsg] = useState("");
   const [aSido, setASido] = useState("");     // 수동 fallback
   const [aSgg, setASgg] = useState("");
+
+  // ── 사건번호 실익 미리보기 상태 ──
+  const [tab, setTab] = useState(initialTab);
+  // #tools 로 한 번 들어오면 그 세션 동안은 진단 탭을 계속 쓸 수 있게 둔다.
+  const [toolsUnlocked, setToolsUnlocked] = useState(
+    () => typeof window !== "undefined" && window.location.hash.includes("tools"),
+  );
+  // 주소창 해시가 바뀌어도(뒤로가기·북마크) 탭이 따라가도록 한다.
+  useEffect(() => {
+    const onHash = () => {
+      setTab(initialTab());
+      if (window.location.hash.includes("tools")) setToolsUnlocked(true);
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  const showTools = toolsUnlocked || tab === "tools";
+
+  const [caseNo, setCaseNo] = useState("");
+  const [cBusy, setCBusy] = useState(false);
+  const [cErr, setCErr] = useState("");
+  const [cData, setCData] = useState(null);
+  // 매물별 실익 입력 { [lotNo]: {claim, senior, assumed, cost} }
+  const [cCalc, setCCalc] = useState({});
+  const setCalcField = (lotNo, field, v) =>
+    setCCalc((prev) => ({ ...prev, [lotNo]: { ...(prev[lotNo] || {}), [field]: v } }));
 
   // ── 낙찰가율 역추적 상태 ──
   const [btSido, setBtSido] = useState("11");
@@ -559,6 +653,56 @@ export default function App() {
     setDlBusy(false);
   }
 
+  // ── 사건번호 실익 미리보기 ──
+  // 사건번호 하나로 그 재산의 감정가를 법원에서 받고, 그 시군구·용도 낙찰가율을 곱해
+  // 예상낙찰가를 낸다. 시세 API가 없어도 되는 이유: 감정가를 법원이 이미 매겨놨다.
+  async function runCaseLookup() {
+    const no = caseNo.trim();
+    if (!no) { setCErr("사건번호를 입력하세요 (예: 2024타경115858)"); return; }
+    setCBusy(true); setCErr(""); setCData(null); setCCalc({});
+    try {
+      const r = await fetch("/api/court-case", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ caseNo: no }),
+      });
+      const data = await r.json();
+      if (!r.ok) throw new Error(data.error || `조회 실패 (${r.status})`);
+      if (!data.lots?.length) {
+        throw new Error("이 사건의 물건을 찾지 못했습니다. 사건번호를 확인해주세요. (기일이 취소·변경된 사건은 조회되지 않는 경우가 있습니다)");
+      }
+      // 낙찰가율은 '최근 1년'(지난달 기준 12개월)으로 고정
+      const endYM = `${_lastE.getFullYear()}${_p2(_lastE.getMonth() + 1)}`;
+      const startYM = shiftYM(endYM, -11);
+      const lots = [];
+      for (const lot of data.lots) {
+        let rate = 0, matched = "-", exact = false;
+        try {
+          const list = await loadCourtSggList(lot.sidoCode);
+          const codes = courtSggCodes(lot.sigungu, lot.sigunguCode, list);
+          const rs = await fetch("/api/court-stats", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ sidoCode: lot.sidoCode, sigunguCodes: codes, startYM, endYM }),
+          });
+          const sd = await rs.json();
+          if (rs.ok) {
+            const m = matchUsageRow(findRows(sd), lot.usage);
+            rate = num(m.row?.dspslAmtRate); matched = m.matched; exact = m.exact;
+          }
+        } catch { /* 낙찰가율만 실패해도 감정가·최저가는 보여준다 */ }
+        lots.push({ ...lot, rate, matched, exact, expected: lot.appraisal * rate / 100 });
+      }
+      // 인수권리 문장에 금액이 적혀 있으면 미리 채워둔다(사용자가 고칠 수 있게).
+      const prefill = {};
+      for (const lot of lots) {
+        const amts = extractAmounts(lot.assumedRights);
+        if (amts.length) prefill[lot.lotNo] = { assumed: String(Math.max(...amts)) };
+      }
+      setCCalc(prefill);
+      setCData({ ...data, lots, period: `${ymLabel(startYM)}~${ymLabel(endYM)}` });
+    } catch (e) { setCErr(String(e.message || e)); }
+    finally { setCBusy(false); }
+  }
+
   // ── 낙찰가율 역추적 ──
   // 외부 서비스가 "평균 낙찰가율 74%"만 주고 기간·산식을 안 밝힐 때, 그 값이 나오는
   // 구간을 거꾸로 찾는다. 월별 통계를 한 번 받아두고 모든 (시작월,종료월) 조합을 로컬 계산.
@@ -619,6 +763,16 @@ export default function App() {
         <h1>법원경매 낙찰가율 조회</h1>
         <p className="sub">소재지·기간을 고르면 법원 매각통계의 용도별 매각가율(=낙찰가율)을 가져옵니다.</p>
       </header>
+      <nav className="tabs">
+        {TABS.filter((t) => t.key !== "tools" || showTools).map((t) => (
+          <button key={t.key} className={tab === t.key ? "on" : ""}
+            onClick={() => { setTab(t.key); if (typeof window !== "undefined") window.location.hash = t.key === "stats" ? "" : t.key; }}>
+            {t.label}
+          </button>
+        ))}
+      </nav>
+
+      {tab === "stats" && (<>
 
       {/* ── 2차 MVP: 주소로 최근 6개월 낙찰가율 찾기 ── */}
       <section className="panel addr">
@@ -676,6 +830,330 @@ export default function App() {
         )}
       </section>
 
+      </>)}
+
+      {tab === "case" && (<>
+      <div className="section-div">사건번호로 실익 미리보기</div>
+
+      <section className="panel addr">
+        <div className="addr-row">
+          <input
+            className="addr-in" value={caseNo} placeholder="사건번호 입력 (예: 2024타경115858)"
+            onChange={(e) => setCaseNo(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && !cBusy) runCaseLookup(); }}
+          />
+          <button className="go" onClick={runCaseLookup} disabled={cBusy}>{cBusy ? "조회 중…" : "실익 조회"}</button>
+        </div>
+        <div className="addr-hint">감정평가액 · 청구금액 · 최선순위 설정일자 · 인수권리를 법원 매각물건명세서에서 가져옵니다</div>
+
+        {cErr && <div className="status err">{cErr}</div>}
+
+        {cData && (
+          <div className="addr-result">
+            <div className="ar-head">
+              <div className="ar-loc">
+                {cData.caseNo} · {cData.court} {cData.dept}
+                {cData.tel ? ` · ${cData.tel}` : ""}
+                {` · 매물 ${cData.lots.length}건 / 목적물 ${cData.objectCount}건`}
+              </div>
+            </div>
+
+            {cData.appraisal && (
+              <div className="appraisal">
+                <span className="ap-label">감정평가</span>
+                가격시점 <b>{ymdLabel(cData.appraisal.priceBaseDate)}</b>
+                {cData.appraisal.appraiser ? ` · 평가사 ${cData.appraisal.appraiser}` : ""}
+                {cData.appraisal.reportNo ? ` · ${cData.appraisal.reportNo}` : ""}
+                {(() => {
+                  const m = monthsBetween(cData.appraisal.priceBaseDate, cData.lots[0]?.saleDate);
+                  if (m == null || m < 18) return null;
+                  return (
+                    <div className="ap-warn">
+                      감정가는 {ymdLabel(cData.appraisal.priceBaseDate)} 시세입니다.
+                      매각기일까지 <b>{Math.floor(m / 12)}년 {m % 12}개월</b> 차이가 나므로
+                      그 사이 시세 변동만큼 예상낙찰가가 빗나갑니다.
+                    </div>
+                  );
+                })()}
+              </div>
+            )}
+
+            {/* 이해관계인 — 권리 구조 */}
+            {cData.caseInfo?.partyCount > 0 && (
+              <div className="parties">
+                <div className="pt-head">이해관계인 {cData.caseInfo.partyCount}명</div>
+                {cData.caseInfo.applicant && (
+                  <div className="pt-applicant">
+                    경매신청자 <b>{cData.caseInfo.applicant.name}</b>
+                    {cData.lots.find((l) => l.claimAmount > 0)
+                      ? ` · 청구금액 ${fmtEok(cData.lots.find((l) => l.claimAmount > 0).claimAmount)}억` : ""}
+                    {cData.caseInfo.applicantNameInTenants && (
+                      <span className="pt-hint"> · 임차인 목록에도 같은 이름이 있습니다 — 보증금 회수 목적일 수 있으나 이름이 마스킹돼 동일인 확인은 필요합니다</span>
+                    )}
+                  </div>
+                )}
+                <div className="pt-chips">
+                  {cData.caseInfo.parties.map((p) => (
+                    <span key={p.type} className={`pt-chip${TAX_PARTY.has(p.type) ? " tax" : ""}`}>
+                      {p.type} <b>{p.count}</b>
+                    </span>
+                  ))}
+                </div>
+                {cData.caseInfo.parties.some((p) => TAX_PARTY.has(p.type)) && (
+                  <div className="pt-warn">
+                    교부권자·압류권자는 조세채권입니다. 당해세는 근저당보다 먼저 배당돼 실익을 직접 깎습니다
+                    — 금액은 법원이 공개하지 않으니 배당요구 내역을 따로 확인하세요.
+                  </div>
+                )}
+                {cData.caseInfo.relatedCases.length > 0 && (
+                  <div className="pt-rel">
+                    관련사건 {cData.caseInfo.relatedCases.map((r) => `${r.court} ${r.caseNo}${r.kind ? ` (${r.kind})` : ""}`).join(" · ")}
+                  </div>
+                )}
+                {cData.caseInfo.relatedCases.some((r) => r.insolvency) && (
+                  <div className="pt-warn">
+                    채무자에게 회생·파산 사건이 걸려 있습니다. 절차가 지연되거나 경매가 중지될 수 있습니다.
+                  </div>
+                )}
+                {(cData.caseInfo.appealed || cData.caseInfo.suspended) && (
+                  <div className="pt-warn">
+                    {cData.caseInfo.appealed ? "항고됨" : ""}
+                    {cData.caseInfo.appealed && cData.caseInfo.suspended ? " / " : ""}
+                    {cData.caseInfo.suspended ? "집행정지" : ""}
+                    {cData.caseInfo.suspendReason ? ` — ${cData.caseInfo.suspendReason}` : ""} · 매각이 지연됩니다.
+                  </div>
+                )}
+                <div className="pt-note">※ 이름은 법원이 마스킹해서 제공합니다(안OO). 구성과 인원만 확인할 수 있습니다.</div>
+              </div>
+            )}
+
+            {/* 사건 정보 — 매물 공통 */}
+            {cData.lots.find((l) => l.caseName) && (
+              <div className="case-info">
+                <dl>
+                  <dt>사건명</dt><dd>{cData.lots.find((l) => l.caseName).caseName}</dd>
+                  {cData.lots.find((l) => l.receiptDate) && <><dt>접수일</dt><dd>{ymdLabel(cData.lots.find((l) => l.receiptDate).receiptDate)}</dd></>}
+                  {cData.lots.find((l) => l.startDate) && <><dt>개시결정</dt><dd>{ymdLabel(cData.lots.find((l) => l.startDate).startDate)}</dd></>}
+                  {cData.lots.find((l) => l.demandDeadline) && <><dt>배당요구종기</dt><dd>{ymdLabel(cData.lots.find((l) => l.demandDeadline).demandDeadline)}</dd></>}
+                  {cData.lots.find((l) => l.claimAmount > 0) && <><dt>청구금액</dt><dd>{fmtEok(cData.lots.find((l) => l.claimAmount > 0).claimAmount)}억</dd></>}
+                  {cData.lots.find((l) => l.specWriteDate) && <><dt>명세서 작성</dt><dd>{ymdLabel(cData.lots.find((l) => l.specWriteDate).specWriteDate)}</dd></>}
+                </dl>
+              </div>
+            )}
+
+            {cData.lots.map((lot) => {
+              const o = lot.objects[0] || {};
+              const band = lot.rate >= 100 ? "hi" : lot.rate >= 80 ? "mid" : lot.rate > 0 ? "lo" : "na";
+              const vsMin = lot.minPrice ? (lot.expected / lot.minPrice - 1) * 100 : null;
+              return (
+                <div key={lot.lotNo} className={`lot ${band}`}>
+                  <div className="lot-addr">
+                    {cData.lots.length > 1 && <b>매물 {lot.lotNo} · </b>}
+                    {lot.sido} {lot.sigungu} {lot.dong} {o.jibun} {o.building} {o.unit}
+                    {lot.objects.length > 1 && <span className="lot-more"> 외 {lot.objects.length - 1}건</span>}
+                  </div>
+                  <div className="lot-meta">
+                    {lot.usage} · {fmtInt(lot.areaSum)}㎡ · 유찰 {lot.failCount}회
+                    {lot.saleDate ? ` · 매각기일 ${lot.saleDate.slice(0, 4)}.${lot.saleDate.slice(4, 6)}.${lot.saleDate.slice(6)}` : ""}
+                  </div>
+                  <div className="lot-nums">
+                    <div><span>감정가</span><b>{fmtEok(lot.appraisal)}억</b></div>
+                    <div><span>최저가</span><b>{fmtEok(lot.minPrice)}억</b></div>
+                    <div><span>낙찰가율</span><b>{lot.rate ? `${lot.rate.toFixed(1)}%` : "-"}</b></div>
+                    <div className="hero"><span>예상낙찰가</span><b>{lot.rate ? `${fmtEok(lot.expected)}억` : "-"}</b></div>
+                  </div>
+                  <div className="lot-basis">
+                    {lot.rate
+                      ? `${lot.sigungu} · ${lot.matched}${lot.exact ? "" : " (용도 매칭 실패 → 전체 적용)"} · ${cData.period} 기준`
+                      : "낙찰가율을 가져오지 못했습니다"}
+                    {vsMin != null && lot.rate ? ` · 최저가 대비 ${vsMin >= 0 ? "+" : ""}${vsMin.toFixed(0)}%` : ""}
+                  </div>
+
+                  {lot.detailReady === false && (
+                    <div className="lot-warn">
+                      매각물건명세서가 아직 공개되지 않았습니다 — 선순위 설정일자·인수권리·청구금액을 가져올 수 없습니다.
+                      명세서는 매각기일이 가까워야 공개되므로{lot.saleDate ? ` (기일 ${ymdLabel(lot.saleDate)})` : ""} 기일 임박 후 다시 조회하세요.
+                    </div>
+                  )}
+
+                  {/* 매각물건명세서 — 선순위 판단의 근거 */}
+                  {(lot.seniorDate || lot.claimAmount > 0 || lot.demandDeadline) && (
+                    <div className="lot-rights">
+                      <div className="lr-title">
+                        매각물건명세서
+                        {lot.specWriteDate ? ` · 작성 ${ymdLabel(lot.specWriteDate)}` : ""}
+                        {lot.caseName ? ` · ${lot.caseName}` : ""}
+                      </div>
+                      <dl>
+                        {lot.seniorDate && <><dt>최선순위 설정</dt><dd>{lot.seniorDate}</dd></>}
+                        {lot.claimAmount > 0 && <><dt>청구금액</dt><dd>{fmtEok(lot.claimAmount)}억 <span className="lr-sub">(경매 신청 채권자)</span></dd></>}
+                        {lot.demandDeadline && <><dt>배당요구종기</dt><dd>{ymdLabel(lot.demandDeadline)}</dd></>}
+                        {lot.surfaceRight && <><dt>법정지상권</dt><dd>{lot.surfaceRight}</dd></>}
+                      </dl>
+                      {lot.seniorDate && (
+                        <div className="lr-hint">※ 이 날짜보다 먼저 전입한 임차인은 대항력이 있어 낙찰자가 인수합니다.</div>
+                      )}
+                    </div>
+                  )}
+
+                  {lot.assumedRights && (
+                    <div className="lot-danger">
+                      <b>인수권리 있음</b> — 매각으로 소멸하지 않는 권리입니다. 낙찰자가 떠안습니다.
+                      <div className="ld-body">{lot.assumedRights}</div>
+                    </div>
+                  )}
+
+                  {lot.schedule?.length > 1 && (
+                    <div className="lot-sched">
+                      저감 이력 {lot.schedule.length}회 · {lot.schedule.map((x) => fmtEok(x.minPrice)).join(" → ")}억
+                    </div>
+                  )}
+
+                  {lot.specRemark && (
+                    <details className="lot-remark">
+                      <summary>명세서 비고</summary>
+                      <pre>{lot.specRemark}</pre>
+                    </details>
+                  )}
+
+                  {/* ── 실익 판단 ── */}
+                  {(() => {
+                    const c = cCalc[lot.lotNo] || {};
+                    const b = benefitOf({
+                      expected: lot.expected, assumed: c.assumed,
+                      cost: c.cost, senior: c.senior, claim: c.claim,
+                    });
+                    const eok = (v) => (v / 1e8);
+                    const field = (key, label, hint) => (
+                      <label className="bf-in">
+                        <span>{label}{hint ? <i>{hint}</i> : null}</span>
+                        <input type="number" min="0" step="1000000" placeholder="0"
+                          value={c[key] ?? ""} onChange={(e) => setCalcField(lot.lotNo, key, e.target.value)} />
+                      </label>
+                    );
+                    return (
+                      <div className="benefit">
+                        <div className="bf-head">실익 판단 <i>단위: 원 — 등기부·집행비용은 직접 입력</i></div>
+                        <div className="bf-inputs">
+                          {field("claim", "우리 채권액")}
+                          {field("senior", "선순위채권 합계", "등기부")}
+                          {field("assumed", "인수권리 금액", lot.assumedRights ? "자동" : null)}
+                          {field("cost", "집행비용")}
+                        </div>
+                        <div className="bf-flow">
+                          <div><span>예상낙찰가</span><b>{fmtEok(b.E)}억</b></div>
+                          <div className="minus"><span>− 인수권리</span><b>{fmtEok(b.A)}억</b></div>
+                          <div className="minus"><span>− 집행비용</span><b>{fmtEok(b.C)}억</b></div>
+                          <div className="eq"><span>= 배당재원</span><b>{fmtEok(b.pool)}억</b></div>
+                          <div className="minus"><span>− 선순위채권</span><b>{fmtEok(b.S)}억</b></div>
+                          <div className="eq final"><span>= 우리 배당가능액</span><b>{fmtEok(b.ours)}억</b></div>
+                        </div>
+                        <div className={`bf-verdict v-${b.verdict}`}>
+                          <b>{VERDICT_LABEL[b.verdict]}</b>
+                          {b.K > 0 && b.verdict !== "unknown" && (
+                            <span> · 채권 {fmtEok(b.K)}억 중 {fmtEok(b.recovered)}억 회수
+                              {b.rate != null ? ` (${b.rate.toFixed(0)}%)` : ""}
+                              {b.ours > b.K ? ` · 배당가능액 ${fmtEok(b.ours)}억 중 초과분은 후순위 몫` : ""}</span>
+                          )}
+                          {b.verdict === "needclaim" && <span> · 배당재원은 {fmtEok(b.ours)}억까지 내려옵니다</span>}
+                        </div>
+                        {lot.failCount >= 3 && (
+                          <div className="bf-caution">유찰 {lot.failCount}회 물건이라 예상낙찰가 자체가 불확실합니다. 위 판정은 참고용입니다.</div>
+                        )}
+                      </div>
+                    );
+                  })()}
+
+                  {/* 현황조사서 임차인 — 대항력 자동 판정 */}
+                  {cData.survey && (cData.survey.tenants.length > 0 || cData.survey.possessions.length > 0) && (
+                    <div className="tenants">
+                      <div className="tn-head">
+                        현황조사서
+                        {cData.survey.receivedDate ? ` · 접수 ${ymdLabel(cData.survey.receivedDate)}` : ""}
+                        {` · 임차인 ${cData.survey.tenants.length}명`}
+                      </div>
+                      {cData.survey.tenants.length > 0 ? (
+                        <table className="tn-table">
+                          <thead><tr><th className="left">전입일</th><th className="left">임차부분</th><th className="left">보증금</th><th className="left">확정일자</th><th className="left">대항력</th></tr></thead>
+                          <tbody>
+                            {cData.survey.tenants.map((t, i) => {
+                              const o = opposability(t.moveIn, lot.seniorDate);
+                              return (
+                                <tr key={i}>
+                                  <td className="left">{t.moveIn || "-"}</td>
+                                  <td className="left">{t.part || "-"}</td>
+                                  <td className="left">{t.deposit || "미상"}</td>
+                                  <td className="left">{t.fixedDate || "-"}</td>
+                                  <td className="left">
+                                    {!o.known ? <span className="tn-na">판단불가</span>
+                                      : o.assume ? <span className="tn-bad">인수 — 최선순위보다 앞섬</span>
+                                        : <span className="tn-ok">소멸</span>}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      ) : (
+                        <div className="tn-none">전입세대 등재된 임차인이 없습니다.</div>
+                      )}
+                      {cData.survey.tenants.some((t) => opposability(t.moveIn, lot.seniorDate).assume) && (
+                        <div className="tn-warn">
+                          최선순위 설정일자({lot.seniorDate})보다 먼저 전입한 임차인이 있습니다.
+                          배당에서 보증금을 다 못 받으면 낙찰자가 인수하므로 그만큼 낙찰가가 낮아집니다.
+                        </div>
+                      )}
+                      {cData.survey.possessions.map((p) => (
+                        <div key={p.objectSeq} className="tn-note">
+                          {cData.survey.possessions.length > 1 ? `[목적물 ${p.objectSeq}] ` : ""}{p.note}
+                        </div>
+                      ))}
+                      {cData.survey.possessionSummary && <div className="tn-note">{cData.survey.possessionSummary}</div>}
+                    </div>
+                  )}
+
+                  {lot.appraisalNotes?.length > 0 && (
+                    <details className="lot-remark">
+                      <summary>감정평가 요점 {lot.appraisalNotes.length}건</summary>
+                      <ul className="lr-objs">
+                        {lot.appraisalNotes.map((t, i) => <li key={i}>{t}</li>)}
+                      </ul>
+                    </details>
+                  )}
+
+                  {lot.objectAppraisals?.length > 1 && (
+                    <details className="lot-remark">
+                      <summary>목적물별 감정평가액 {lot.objectAppraisals.length}건</summary>
+                      <ul className="lr-objs">
+                        {lot.objectAppraisals.map((o) => (
+                          <li key={o.seq}>
+                            #{o.seq} {o.dong} {o.jibun} {o.building} {o.area} {o.landCategory} — <b>{fmtEok(o.appraisal)}억</b>
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
+                  )}
+                  {lot.usageMix?.length > 1 && <div className="lot-warn">용도가 섞여 있습니다 — {lot.usageMix.join(", ")}. 대표 용도로 계산했습니다.</div>}
+                  {lot.failCount >= 3 && <div className="lot-warn">⚠ 유찰 {lot.failCount}회 — 평균 낙찰가율로는 예측이 맞지 않습니다. 유찰이 반복되는 물건은 별도 사유(유치권·대항력 임차인 등)를 확인하세요.</div>}
+                  {lot.specialCond && <div className="lot-warn">⚠ 특수조건 있음 (코드 {lot.specialCond}) — 매각물건명세서 확인 필요</div>}
+                </div>
+              );
+            })}
+
+            {cData.lots.length > 1 && (
+              <div className="lot-total">
+                사건 합계 · 감정가 {fmtEok(cData.lots.reduce((s, l) => s + l.appraisal, 0))}억
+                → 예상낙찰가 {fmtEok(cData.lots.reduce((s, l) => s + l.expected, 0))}억
+              </div>
+            )}
+            <div className="ar-note">※ 예상낙찰가 = 법원 감정가 × 해당 시군구·용도 매각가율(최근 1년 금액가중). 최선순위 설정일자·인수권리는 매각물건명세서에서 가져온 값이며, 임차인 개별 현황과 집행비용은 반영되지 않습니다.</div>
+          </div>
+        )}
+      </section>
+
+      </>)}
+
+      {tab === "stats" && (<>
       <div className="section-div">상세 통계 (지역·기간 직접 선택)</div>
 
       <section className="panel controls">
@@ -791,6 +1269,9 @@ export default function App() {
           <pre className="raw">{JSON.stringify(resp, null, 2).slice(0, 2000)}</pre></section>
       )}
 
+      </>)}
+
+      {tab === "tools" && (<>
       <div className="section-div">낙찰가율 역추적 (기간·산식 거꾸로 찾기)</div>
 
       <section className="panel controls bt">
@@ -884,6 +1365,8 @@ export default function App() {
           )}
         </section>
       )}
+
+      </>)}
 
       <footer className="foot">출처: 대한민국 법원 법원경매정보 · 매각통계(selectRletCortDspslStats)</footer>
     </div>

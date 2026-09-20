@@ -54,3 +54,47 @@ export function groupRows(rows) {
   }
   return out;
 }
+
+// ── 물건 용도명 → 매각통계 용도명 ──
+// 경매물건 검색과 매각통계가 서로 다른 용도명을 쓴다.
+//   물건: "연립주택,다세대,빌라" / "단독주택다가구" / "다세대"
+//   통계: 세부 "연립주택,다세대" · 대분류(header) "단독주택,다가구주택"
+// 그대로 매칭하면 실패해서 '전체' 낙찰가율로 떨어지므로 후보를 순서대로 시도한다.
+const USAGE_ALIAS = {
+  "아파트": ["아파트"],
+  "연립주택,다세대,빌라": ["연립주택,다세대"],
+  "연립주택": ["연립주택,다세대"],
+  "다세대": ["연립주택,다세대"],
+  "빌라": ["연립주택,다세대"],
+  "단독주택": ["단독주택", "단독주택,다가구주택"],
+  "다가구주택": ["다가구주택", "단독주택,다가구주택"],
+  "단독주택다가구": ["단독주택,다가구주택"],
+  "단독주택,다가구주택": ["단독주택,다가구주택"],
+  "오피스텔": ["오피스텔", "상가,오피스텔,근린시설"],
+  "근린시설": ["근린시설", "상가,오피스텔,근린시설"],
+  "상가": ["상가", "상가,오피스텔,근린시설"],
+  "상가,오피스텔,근린시설": ["상가,오피스텔,근린시설"],
+  "대지": ["대지", "대지,임야,전답"],
+  "임야": ["임야", "대지,임야,전답"],
+  "전답": ["전답", "대지,임야,전답"],
+  "대지,임야,전답": ["대지,임야,전답"],
+};
+
+// 물건 용도명으로 통계 행을 찾는다. 못 찾으면 '전체' 행으로 폴백.
+// 반환: { row, matched: 매칭에 쓴 이름, exact: 용도 단위로 맞췄는지 }
+export function matchUsageRow(rows, usage) {
+  const list = rows || [];
+  const total = list.find((r) => r.lclDspslGdsLstUsgNm === "전체");
+  const name = String(usage || "").trim();
+  const tries = [name, ...(USAGE_ALIAS[name] || [])];
+  for (const t of tries) {
+    if (!t) continue;
+    const leaf = list.find((r) => r.lclDspslGdsLstUsgNm === t);
+    if (leaf) return { row: leaf, matched: t, exact: true };
+    // 대분류(header)로 맞으면 그 그룹의 소계 행을 쓴다
+    const grp = list.filter((r) => String(r.header) === t);
+    const sub = grp.find((r) => r.lclDspslGdsLstUsgNm === "소계") || (grp.length === 1 ? grp[0] : null);
+    if (sub) return { row: sub, matched: t, exact: true };
+  }
+  return { row: total || null, matched: "전체", exact: false };
+}
