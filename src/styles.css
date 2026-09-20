@@ -383,3 +383,4 @@ tr.bad td { background: #fef4f3 !important; }
   .bx-steps span { flex: 1 1 100%; }
 }
 .status .nf-note { margin-top: 6px; font-size: 12.5px; font-family: var(--sans); opacity: .9; }
+.lot-warn .lw-sub { margin-top: 5px; font-size: 12px; opacity: .92; }

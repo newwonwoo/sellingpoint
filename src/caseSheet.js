@@ -206,7 +206,7 @@ export function caseRows(data, input) {
 
     // 특이사항 — 담당자가 필터를 걸 칼럼. 실익을 깎거나 판정을 못 믿게 만드는 것만 모은다.
     const flags = [];
-    if (lot.detailReady === false) flags.push("명세서 미공개");
+    if (lot.detailReady === false && !data.partial) flags.push("명세서 미공개");
     if (lot.assumedRights) flags.push("인수권리 있음");
     if (assumeList.length) flags.push(`대항력 임차인 ${assumeList.length}명`);
     if (!tn.scoped && tn.list.length) flags.push("임차인 매물구분 불명");
@@ -217,8 +217,10 @@ export function caseRows(data, input) {
     if (lot.failCount >= 3) flags.push(`유찰 ${lot.failCount}회 — 예상낙찰가 불확실`);
     if (gap != null && gap >= 18) flags.push(`감정 ${Math.floor(gap / 12)}년 ${gap % 12}개월 경과`);
     if (!lot.rate) flags.push("낙찰가율 조회 실패");
-    else if (lot.exact === false) flags.push("용도 매칭 실패 — 전체 낙찰가율 적용");
+    else if (lot.exact === false && !data.partial) flags.push("용도 매칭 실패 — 전체 낙찰가율 적용");
     if (data.courtConflict) flags.push("동일 사건번호가 여러 법원에 있음 — 법원 확인 필요");
+    // 검색에 안 잡혀 사건내역에서 감정가만 건져온 매물. 없는 값이 많다는 걸 반드시 알려야 한다.
+    if (data.partial) flags.push("매각물건 검색 미노출 — 사건내역의 감정가로 계산(면적·유찰·명세서·용도 없음, 낙찰가율은 시군구 전체)");
     if (lot.usageMix?.length > 1) flags.push(`용도 혼재 ${lot.usageMix.join(" ")}`);
     // ⚠ 한 사건에 매물이 여럿이면 우리 채권액을 매물마다 그대로 적용한다(매물별 시나리오).
     //   칼럼을 세로로 더하면 같은 채권을 여러 번 세게 된다. 파일에 못 박아 둔다.
@@ -237,11 +239,11 @@ export function caseRows(data, input) {
       lot.lotNo || "",
       addr,
       lot.usage || "",
-      round1(lot.areaSum),
+      lot.areaSum == null ? null : round1(lot.areaSum),
       ymdLabel(lot.saleDate),
-      num(lot.failCount),
+      lot.failCount == null ? null : num(lot.failCount),
       num(lot.appraisal),
-      num(lot.minPrice),
+      num(lot.minPrice) || null,
       lot.rate ? round1(lot.rate) : null,
       lot.rate ? Math.round(lot.expected) : null,
       b.K || null,

@@ -981,6 +981,18 @@ export default function App() {
                 아래 매물에 다른 법원 사건이 섞여 있습니다 — 법원을 확인하고 해당 매물만 보세요.
               </div>
             )}
+            {/* 검색에 안 잡혀 사건내역에서 감정가만 건져온 경우 — 어디서 온 값인지 밝힌다 */}
+            {cData.partial && (
+              <div className="lot-warn">
+                이 사건은 <b>매각물건 검색에 아직 나오지 않습니다</b>
+                {cData.partialReason === "no_date" ? " (매각기일 공고 전)" : ""}.
+                법원 <b>사건내역</b>에서 감정평가액을 가져와 계산했습니다.
+                <div className="lw-sub">
+                  없는 값: 면적 · 유찰횟수 · 매각물건명세서(최선순위·인수권리·청구금액) · 물건 용도.
+                  용도를 모르므로 낙찰가율은 그 시군구 <b>전체</b> 값을 적용했습니다 — 공고가 나면 다시 조회하세요.
+                </div>
+              </div>
+            )}
             {/* 매물 전체에 똑같이 해당하는 경고는 여기서 한 번만 말한다(카드에서는 생략된다) */}
             {caseWide.unready && (
               <div className="lot-warn">
@@ -1091,12 +1103,15 @@ export default function App() {
                     {lot.objects.length > 1 && <span className="lot-more"> 외 {lot.objects.length - 1}건</span>}
                   </div>
                   <div className="lot-meta">
-                    {lot.usage} · {fmtInt(lot.areaSum)}㎡ · 유찰 {lot.failCount}회
+                    {/* 사건내역에서 온 매물은 면적·유찰횟수가 없다. 0으로 찍으면 '유찰 0회'라는
+                        거짓말이 되므로 '-'로 둔다. */}
+                    {lot.usage || "용도 미상"} · {lot.areaSum == null ? "면적 -" : `${fmtInt(lot.areaSum)}㎡`}
+                    {lot.failCount == null ? " · 유찰 -" : ` · 유찰 ${lot.failCount}회`}
                     {lot.saleDate ? ` · 매각기일 ${lot.saleDate.slice(0, 4)}.${lot.saleDate.slice(4, 6)}.${lot.saleDate.slice(6)}` : ""}
                   </div>
                   <div className="lot-nums">
                     <div><span>감정가</span><b>{fmtEok(lot.appraisal)}억</b></div>
-                    <div><span>최저가</span><b>{fmtEok(lot.minPrice)}억</b></div>
+                    <div><span>최저가</span><b>{lot.minPrice ? `${fmtEok(lot.minPrice)}억` : "-"}</b></div>
                     <div><span>낙찰가율</span><b>{lot.rate ? `${lot.rate.toFixed(1)}%` : "-"}</b></div>
                     <div className="hero"><span>예상낙찰가</span><b>{lot.rate ? `${fmtEok(lot.expected)}억` : "-"}</b></div>
                   </div>
@@ -1107,7 +1122,8 @@ export default function App() {
                     {vsMin != null && lot.rate ? ` · 최저가 대비 ${vsMin >= 0 ? "+" : ""}${vsMin.toFixed(0)}%` : ""}
                   </div>
 
-                  {lot.detailReady === false && !caseWide.unready && (
+                  {/* partial 이면 위 배너가 이미 "명세서 없음"을 말했다 — 두 번 말하지 않는다 */}
+                  {lot.detailReady === false && !caseWide.unready && !cData.partial && (
                     <div className="lot-warn">
                       매각물건명세서가 아직 공개되지 않았습니다 — 선순위 설정일자·인수권리·청구금액을 가져올 수 없습니다.
                       명세서는 매각기일이 가까워야 공개되므로{lot.saleDate ? ` (기일 ${ymdLabel(lot.saleDate)})` : ""} 기일 임박 후 다시 조회하세요.

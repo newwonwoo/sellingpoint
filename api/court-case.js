@@ -385,8 +385,8 @@ async function fetchAppraisal(cookie, csNo, courtCode) {
   } catch { return null; }
 }
 
-// 사건 기본사항만 가져온다(사건내역 API). 종결 사건도 돌려준다 — 검색과 다른 점이 이것이다.
-async function caseBasics(cookie, csNo, courtCode) {
+// 사건내역 원본. 종결 사건도 돌려준다 — 검색과 다른 점이 이것이다.
+async function caseDetail(cookie, csNo, courtCode) {
   try {
     const r = await fetch(BASE + PARTY_PATH, {
       method: "POST",
@@ -399,24 +399,68 @@ async function caseBasics(cookie, csNo, courtCode) {
       body: JSON.stringify({ dma_srchCsDtlInf: { csNo, cortOfcCd: courtCode, pgmId: "PGJ15AF01", srchInfo: {} } }),
     });
     if (r.status !== 200) return null;
-    return (await r.json())?.data?.dma_csBasInf || null;
+    const d = (await r.json())?.data;
+    return d?.dma_csBasInf ? d : null;
   } catch { return null; }
+}
+
+// ── 검색에 안 잡히는 사건의 감정가 ────────────────────────────
+// 사건내역의 dlt_dspslGdsDspslObjctLst 에 매물별 감정가가 들어 있다. 이게 검색보다 넓다.
+//   실측(서울중앙 미종국 부동산 13건): 감정가 있고 검색됨 6 / 감정가 있는데 검색 0건 7.
+//   절반 넘게가 '감정은 끝났는데 아직 공고 전'이라 검색에만 안 잡히던 것이다.
+// ⚠ 종국된 사건은 이 데이터셋도 0건이다(종국 26건 전부 0건 — 종국 10일 지난 건도 0건).
+//   즉 이 경로로 살릴 수 있는 건 '미종국 + 감정평가 완료' 사건이다. 종결 사건은 못 살린다.
+// ⚠ 여기엔 면적·유찰횟수가 없고 매각물건명세서도 안 열린다. 없는 값을 0으로 채우면
+//   "유찰 0회"처럼 읽혀 거짓말이 되므로 null 로 두고 화면에서 '-'로 표시한다.
+// ⚠ 용도는 3단계 코드(20000/20100/20104)로만 온다. 코드→이름 표를 만들어 보려고
+//   검색 결과와 짝지어 332건을 수확했는데 20104 하나가 아파트·다세대·오피스텔·상가에
+//   모두 걸릴 만큼 충돌이 심했다. 억지로 매핑하면 엉뚱한 낙찰가율이 붙으므로 쓰지 않고,
+//   용도를 비워 '전체' 낙찰가율로 떨어뜨린 뒤 화면·엑셀에 그 사실을 표시한다.
+function lotsFromCase(d) {
+  const gds = d?.dlt_dspslGdsDspslObjctLst || [];
+  const objs = d?.dlt_rletCsDspslObjctLst || [];
+  return gds.filter((g) => n(g.aeeEvlAmt) > 0).map((g) => {
+    const mine = objs.filter((o) => String(o.dspslObjctSeq) === String(g.dspslObjctSeq));
+    const use = mine.length ? mine : objs;
+    return {
+      lotNo: String(g.dspslGdsSeq ?? "1"),
+      courtCode: g.cortOfcCd || "",
+      sido: g.adongSdNm || "", sigungu: g.adongSggNm || "", dong: g.adongEmdNm || "",
+      sidoCode: g.rprsAdongSdCd || "", sigunguCode: g.rprsAdongSggCd || "",
+      appraisal: n(g.aeeEvlAmt),
+      minPrice: n(g.fstPbancLwsDspslPrc) || null,   // 공고 전이면 최저가도 없다
+      minRate: 0,
+      failCount: null,               // 사건내역엔 유찰횟수가 없다. 0으로 채우지 않는다.
+      areaSum: null,                 // 면적도 없다.
+      saleDate: g.dspslDxdyYmd || "",
+      place: "", specialCond: "",
+      note: g.dspslGdsRmk || "",
+      usage: "", usageMix: [],       // 용도코드는 신뢰할 수 없어 비운다(→ 전체 낙찰가율)
+      usageCode: [g.lclDspslGdsLstUsgCd, g.mclDspslGdsLstUsgCd, g.sclDspslGdsLstUsgCd].filter(Boolean).join("/"),
+      objects: use.map((o) => ({
+        seq: String(o.dspslObjctSeq ?? ""),
+        jibun: o.rprsLtnoAddr || "", building: o.bldNm || "",
+        unit: o.bldDtlDts || "", usage: o.auctnLstNm || "", area: 0,
+      })),
+    };
+  });
 }
 
 // 검색이 0건일 때 사유를 가른다. courtCode 를 알면 한 번, 모르면 전 법원을 훑는다.
 async function diagnose(cookie, csNo, courtCode) {
-  let b = null;
+  let d = null;
   if (courtCode) {
-    b = await caseBasics(cookie, csNo, courtCode);
+    d = await caseDetail(cookie, csNo, courtCode);
   } else {
-    for (let i = 0; i < COURT_CODES.length && !b; i += PROBE_BATCH) {
+    for (let i = 0; i < COURT_CODES.length && !d; i += PROBE_BATCH) {
       const hits = await Promise.all(
-        COURT_CODES.slice(i, i + PROBE_BATCH).map((c) => caseBasics(cookie, csNo, c)),
+        COURT_CODES.slice(i, i + PROBE_BATCH).map((c) => caseDetail(cookie, csNo, c)),
       );
-      b = hits.find(Boolean) || null;
+      d = hits.find(Boolean) || null;
     }
   }
-  if (!b) return { reason: "absent" };
+  if (!d) return { reason: "absent" };
+  const b = d.dma_csBasInf;
   // 법원 화면 로직과 동일: ultmtDvsCd "000" = 미종국
   const closed = String(b.ultmtDvsCd || "000") !== "000";
   // ⚠ 자동차·선박 경매는 이 앱의 검색 조건(부동산)에 애초에 안 걸린다. 기일을 기다려도 안 나온다.
@@ -427,6 +471,7 @@ async function diagnose(cookie, csNo, courtCode) {
   const notRealty = /자동차|선박|항공기|건설기계|유체동산/.test(b.csNm || "");
   return {
     reason: closed ? "closed" : notRealty ? "not_realty" : "no_date",
+    detail: d,
     court: b.cortOfcNm || "",
     dept: b.cortAuctnJdbnNm || "",
     caseName: b.csNm || "",
@@ -540,7 +585,25 @@ export default async function handler(req, res) {
     // 0건이면 왜 0건인지까지 알아내서 돌려준다. 여기서 끝내지 않으면 화면이
     // "사건번호를 확인하세요"라고만 하게 되는데, 대개 사건은 멀쩡하고 종결됐을 뿐이다.
     if (!uniq.length) {
-      const d = await diagnose(cookie, csNo, body.courtCode || "");
+      const { detail, ...d } = await diagnose(cookie, csNo, body.courtCode || "");
+      // 검색엔 없어도 감정가가 있으면 그걸로 분석을 살린다. 실익 판단의 출발점이 감정가라서
+      // 이게 있으면 '조회 실패'가 아니라 '자료가 덜 찬 조회 성공'이다.
+      const lots = d.reason === "closed" ? [] : lotsFromCase(detail);
+      if (lots.length) {
+        const courtCode = lots[0].courtCode;
+        const survey = await fetchSurvey(cookie, csNo, courtCode);
+        const caseInfo = await fetchParties(cookie, csNo, courtCode);
+        const appraisal = await fetchAppraisal(cookie, csNo, courtCode);
+        for (const lot of lots) { lot.detailReady = false; delete lot.courtCode; }
+        return res.status(200).json({
+          caseNo: csNo, found: true,
+          partial: true, partialReason: d.reason,   // 어디서 왔는지 화면이 밝혀야 한다
+          court: d.court || "", dept: d.dept || "", tel: "",
+          objectCount: lots.reduce((s, l) => s + l.objects.length, 0),
+          courtConflict: false, survey, caseInfo, appraisal, lots,
+          caseName: d.caseName, receiptDate: d.receiptDate, claimAmount: d.claimAmount,
+        });
+      }
       return res.status(200).json({ caseNo: csNo, found: false, lots: [], ...d });
     }
 
