@@ -13,6 +13,7 @@
 const BASE = "https://www.courtauction.go.kr";
 const SEARCH_PATH = "/pgj/pgjsearch/searchControllerMain.on";
 const DETAIL_PATH = "/pgj/pgj15B/selectAuctnCsSrchRslt.on";   // 사건상세 (매각물건명세서 항목 포함)
+const SURVEY_PATH = "/pgj/pgj15B/selectCurstExmndc.on";       // 현황조사서 (임차인 전입일·점유관계)
 const SEED_PATH = "/pgj/index.on?w2xPath=/pgj/ui/pgj100/PGJ151F00.xml";
 
 // 검색 본문 템플릿(필드 ~60개). 부분만 보내면 서버가 거절하므로 전체를 보낸다.
@@ -181,6 +182,60 @@ async function fetchDetail(cookie, csNo, courtCode, lotNo) {
   } catch { return null; }
 }
 
+// 현황조사서 — 집행관이 현장에 나가 조사한 점유관계와 임차인 명세.
+// 매각물건명세서의 '최선순위 설정일자'와 여기 '전입일'을 비교하면 대항력 판정이 된다.
+//   전입일 < 최선순위  → 대항력 있음 = 낙찰자 인수
+//   전입일 ≥ 최선순위  → 대항력 없음 = 매각으로 소멸
+// ⚠ 사건 단위라 dspslGdsSeq 를 받지 않는다. 임차인은 objctSeq(목적물)로 묶인다.
+async function fetchSurvey(cookie, csNo, courtCode) {
+  try {
+    const r = await fetch(BASE + SURVEY_PATH, {
+      method: "POST",
+      headers: {
+        ...browserHeaders(),
+        "Content-Type": "application/json;charset=UTF-8",
+        Referer: BASE + "/pgj/index.on?w2xPath=/pgj/ui/pgj100/PGJ15BP01.xml",
+        "SC-Userid": "SYSTEM",
+        "SC-Pgmid": "PGJ15BP01",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        dma_srchCurstExmn: {
+          csNo, cortOfcCd: courtCode, dspslGdsSeq: "1",
+          pgmId: "PGJ15BP01", srchInfo: {},
+        },
+      }),
+    });
+    if (r.status !== 200) return null;
+    const d = (await r.json())?.data;
+    if (!d) return null;
+    const m = d.dma_curstExmnMngInf || {};
+    const strip = (v) => String(v || "").replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+    return {
+      surveyDate: strip(m.exmnDtDts),
+      receivedDate: m.exmndcRcptnYmd || "",
+      possessionSummary: strip(`${m.fstmLstPossRltnDts || ""}${m.scntmLstPossRltnDts || ""}`),
+      // 목적물별 점유관계 설명
+      possessions: (d.dlt_ordTsRlet || []).map((x) => ({
+        objectSeq: x.dspslObjctSeq,
+        tenantCount: n(x.lesCnt),
+        note: strip(x.gdsPossCtt),
+      })).filter((x) => x.note || x.tenantCount),
+      // 임차인 명세
+      tenants: (d.dlt_ordTsLserLtn || []).map((x) => ({
+        objectSeq: x.objctSeq,
+        name: x.intrpsNm || "",
+        moveIn: String(x.mvinDtlCtt || "").trim(),        // 전입일
+        part: x.lesPartCtt || "",                          // 임차부분
+        deposit: x.lesDposDts || "",                       // 보증금
+        rent: x.mmrntAmtDts || "",                         // 차임
+        fixedDate: x.rgstryCrtcpCfmtnCtt || "",            // 확정일자
+        remark: strip(x.lesDtsRmk),
+      })),
+    };
+  } catch { return null; }
+}
+
 export default async function handler(req, res) {
   try {
     const raw = req.method === "POST" ? req.body : req.query;
@@ -240,6 +295,9 @@ export default async function handler(req, res) {
     const head = uniq[0] || {};
     const lots = groupByLot(uniq);
 
+    // 현황조사서는 사건 단위라 한 번만 부른다.
+    const survey = await fetchSurvey(cookie, csNo, head.boCd || lots[0]?.courtCode);
+
     // 매물마다 사건상세를 붙인다(선순위·청구금액·명세서 비고). 실패해도 기본 정보는 살린다.
     for (const lot of lots) {
       const detail = await fetchDetail(cookie, csNo, lot.courtCode, lot.lotNo);
@@ -257,6 +315,7 @@ export default async function handler(req, res) {
       dept: head.jpDeptNm || "",
       tel: head.tel || "",
       objectCount: uniq.length,
+      survey,
       lots,
     });
   } catch (e) {

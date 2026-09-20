@@ -302,3 +302,17 @@ tr.bad td { background: #fef4f3 !important; }
 .bf-verdict.v-needclaim,
 .bf-verdict.v-unknown { background: #f1f5f9; border: 1px solid var(--line); color: var(--muted); }
 .bf-caution { margin-top: 7px; font-size: 11.5px; color: #8A5200; }
+
+/* 현황조사서 임차인 */
+.tenants { margin-top: 11px; border: 1px solid var(--line); border-radius: 9px; padding: 11px 13px; background: #fff; }
+.tn-head { font-size: 11.5px; font-weight: 700; color: var(--muted); margin-bottom: 8px; }
+.tn-table { width: 100%; font-size: 12.5px; border-collapse: collapse; }
+.tn-table thead th { background: #f1f5f9; color: var(--muted); font-size: 11px; padding: 5px 8px; border: 0; border-bottom: 1px solid var(--line); text-align: left; }
+.tn-table tbody td { padding: 6px 8px; border-bottom: 1px solid var(--line); font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.tn-table tbody tr:last-child td { border-bottom: 0; }
+.tn-bad { color: var(--red); font-weight: 700; font-family: var(--sans); }
+.tn-ok { color: #047857; font-family: var(--sans); }
+.tn-na { color: var(--muted); font-family: var(--sans); }
+.tn-none { font-size: 12.5px; color: var(--muted); }
+.tn-warn { margin-top: 8px; padding: 8px 11px; border-radius: 7px; background: #fdf3f2; border: 1px solid #f0c9c6; color: var(--red); font-size: 12.5px; }
+.tn-note { margin-top: 7px; font-size: 12px; color: #3b4759; line-height: 1.55; }

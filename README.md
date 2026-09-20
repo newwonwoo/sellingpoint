@@ -95,6 +95,20 @@ vercel dev        # 로컬(한국 IP) — WAF 안전. 엑셀 대량수집도 이
 이때 선순위·청구금액을 조용히 비우지 말고 `detailReady: false` 로 표시해 화면에서 안내한다.
 감정가·최저가·유찰횟수는 목록에서 오므로 이 경우에도 정상이다.
 
+### 임차인 현황 — 현황조사서 API
+`/pgj/pgj15B/selectCurstExmndc.on` (요청 래퍼 `dma_srchCurstExmn`, 사건 단위라 `dspslGdsSeq` 무시)
+
+| 데이터셋 | 내용 |
+|---|---|
+| `dlt_ordTsLserLtn` | **임차인 명세** — `mvinDtlCtt`(전입일) `lesPartCtt`(임차부분) `lesDposDts`(보증금) `rgstryCrtcpCfmtnCtt`(확정일자) |
+| `dlt_ordTsRlet` | 목적물별 점유관계 `gdsPossCtt` · 임차인 수 `lesCnt` |
+| `dma_curstExmnMngInf` | 조사일시·송달·접수일, 점유관계 요약 |
+
+명세서의 **최선순위 설정일자**와 여기 **전입일**을 비교해 대항력을 자동 판정한다.
+전입일 < 최선순위 → 인수(낙찰자 부담) / 전입일 ≥ 최선순위 → 소멸.
+예) 2023타경109238은 최선순위가 2023.07.03인데 임차인 4명이 2021~2023.05에 전입해
+전원 대항력 있음 — 실익 판단에서 반드시 봐야 할 정보다.
+
 ### 매각물건명세서 원문(PDF)은 못 가져온다
 `insertDspslGdsSpecArtcWdrwInf.on` 이 소송문서뷰어 URL과 `encParam` 을 발급해 주는 데까지는 된다.
 다만 뷰어(`ecfs.scourt.go.kr`)가 익명 요청에 세션을 주지 않아 `selectDocVwrInf.on` 이 500을 낸다.

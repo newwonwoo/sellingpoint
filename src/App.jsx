@@ -192,6 +192,19 @@ const VERDICT_LABEL = {
   none: "실익 없음", partial: "일부 회수", full: "전액 회수 가능",
   needclaim: "우리 채권액을 입력하세요", unknown: "판단 불가",
 };
+// "2023.10.12.가압류" / "2023. 7. 3. 강제경매개시결정" → Date. 못 읽으면 null.
+function parseKoDate(text) {
+  const m = /(\d{4})\s*[.\-년]\s*(\d{1,2})\s*[.\-월]\s*(\d{1,2})/.exec(String(text || ""));
+  if (!m) return null;
+  const d = new Date(+m[1], +m[2] - 1, +m[3]);
+  return Number.isNaN(d.getTime()) ? null : d;
+}
+// 대항력 판정 — 전입일이 최선순위 설정일자보다 앞서면 낙찰자가 인수한다.
+function opposability(moveIn, seniorDate) {
+  const a = parseKoDate(moveIn), b = parseKoDate(seniorDate);
+  if (!a || !b) return { known: false };
+  return { known: true, assume: a < b, moveIn: a, senior: b };
+}
 const ymdLabel = (v) => { const s = String(v || ""); return s.length === 8 ? `${s.slice(0,4)}.${s.slice(4,6)}.${s.slice(6)}` : s; };
 
 // ── 2차 MVP: 주소 → 시군구 로컬 파싱 (외부 API 키 불필요) ──
@@ -972,6 +985,54 @@ export default function App() {
                       </div>
                     );
                   })()}
+
+                  {/* 현황조사서 임차인 — 대항력 자동 판정 */}
+                  {cData.survey && (cData.survey.tenants.length > 0 || cData.survey.possessions.length > 0) && (
+                    <div className="tenants">
+                      <div className="tn-head">
+                        현황조사서
+                        {cData.survey.receivedDate ? ` · 접수 ${ymdLabel(cData.survey.receivedDate)}` : ""}
+                        {` · 임차인 ${cData.survey.tenants.length}명`}
+                      </div>
+                      {cData.survey.tenants.length > 0 ? (
+                        <table className="tn-table">
+                          <thead><tr><th className="left">전입일</th><th className="left">임차부분</th><th className="left">보증금</th><th className="left">확정일자</th><th className="left">대항력</th></tr></thead>
+                          <tbody>
+                            {cData.survey.tenants.map((t, i) => {
+                              const o = opposability(t.moveIn, lot.seniorDate);
+                              return (
+                                <tr key={i}>
+                                  <td className="left">{t.moveIn || "-"}</td>
+                                  <td className="left">{t.part || "-"}</td>
+                                  <td className="left">{t.deposit || "미상"}</td>
+                                  <td className="left">{t.fixedDate || "-"}</td>
+                                  <td className="left">
+                                    {!o.known ? <span className="tn-na">판단불가</span>
+                                      : o.assume ? <span className="tn-bad">인수 — 최선순위보다 앞섬</span>
+                                        : <span className="tn-ok">소멸</span>}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      ) : (
+                        <div className="tn-none">전입세대 등재된 임차인이 없습니다.</div>
+                      )}
+                      {cData.survey.tenants.some((t) => opposability(t.moveIn, lot.seniorDate).assume) && (
+                        <div className="tn-warn">
+                          최선순위 설정일자({lot.seniorDate})보다 먼저 전입한 임차인이 있습니다.
+                          배당에서 보증금을 다 못 받으면 낙찰자가 인수하므로 그만큼 낙찰가가 낮아집니다.
+                        </div>
+                      )}
+                      {cData.survey.possessions.map((p) => (
+                        <div key={p.objectSeq} className="tn-note">
+                          {cData.survey.possessions.length > 1 ? `[목적물 ${p.objectSeq}] ` : ""}{p.note}
+                        </div>
+                      ))}
+                      {cData.survey.possessionSummary && <div className="tn-note">{cData.survey.possessionSummary}</div>}
+                    </div>
+                  )}
 
                   {lot.appraisalNotes?.length > 0 && (
                     <details className="lot-remark">
