@@ -3,7 +3,12 @@
 //        법원코드(cortOfcCd)는 없어도 되고, "2024타경115858" 형식 그대로 받는다.
 // [왜]   실익분석은 '그 재산'이 대상이다. 감정가·최저가·유찰횟수·면적이 여기서 다 나오므로
 //        시세 API 없이도 예상낙찰가를 낼 수 있다. (감정가 × 그 시군구·용도 낙찰가율)
-// [한계] 모든 사건이 조회되지는 않는다. 기일이 취소·변경된 사건은 0건으로 오는 경우가 있다.
+// [⚠ 기일 범위를 반드시 같이 보낸다]
+//   csNo 만 보내면 서버가 '공고 게시 중인 임박 기일'로 범위를 좁혀버려 사건이 멀쩡히 있는데도
+//   0건이 온다. 실측: 매각기일까지 D-10 이내는 조회되고 D-16 이상은 안 됐다(법원마다 편차).
+//   bidBgngYmd~bidEndYmd 를 넓게 주면 그 범위 안에 기일이 있는 사건은 전부 잡힌다.
+//   검증: 0건이던 4개 사건(2021타경103946 등)이 전부 조회되고, 되던 사건들도 결과 동일.
+// [한계] 과거 기일만 있는 사건(종결·취하)은 어떤 범위로도 0건이다. 진행 중 사건만 조회된다.
 
 const BASE = "https://www.courtauction.go.kr";
 const SEARCH_PATH = "/pgj/pgjsearch/searchControllerMain.on";
@@ -28,6 +33,14 @@ const SEARCH_INFO_TEMPLATE = {
   dspslPlcNm: "", lwsDspslPrcMin: "", lwsDspslPrcMax: "", grbxTypCd: "", gdsVendNm: "",
   fuelKndCd: "", carMdyrMax: "", carMdyrMin: "", carMdlNm: "", sideDvsCd: "",
 };
+
+// 기일 검색 범위 — 오늘부터 10년. 넓혀도 결과가 늘지 않고(실측) 좁히면 사건을 놓친다.
+function bidRange() {
+  const d = new Date();
+  const ymd = (x) => `${x.getFullYear()}${String(x.getMonth() + 1).padStart(2, "0")}${String(x.getDate()).padStart(2, "0")}`;
+  const end = new Date(d.getFullYear() + 10, d.getMonth(), d.getDate());
+  return { bidBgngYmd: ymd(d), bidEndYmd: ymd(end) };
+}
 
 function browserHeaders() {
   return {
@@ -128,10 +141,14 @@ async function fetchDetail(cookie, csNo, courtCode, lotNo) {
     });
     if (r.status !== 200) return null;
     const d = (await r.json())?.data?.dma_result;
-    if (!d) return null;
+    // ⚠ 매각물건명세서가 아직 공개되지 않은 사건은 dma_result 가 빈 객체로 온다.
+    //   명세서는 매각기일이 가까워야 공개된다(실측: 기일 D-16 공개 / D-18 미공개).
+    //   이때 선순위·청구금액을 조용히 비우지 말고 "아직 공개 전"임을 알려야 한다.
+    if (!d || !d.dspslGdsDxdyInfo) return { detailReady: false };
     const b = d.csBaseInfo || {};
     const g = d.dspslGdsDxdyInfo || {};
     return {
+      detailReady: true,
       caseName: b.csNm || "",                       // 부동산강제경매 / 임의경매
       receiptDate: b.csRcptYmd || "",
       startDate: b.csCmdcYmd || "",
@@ -194,7 +211,7 @@ export default async function handler(req, res) {
           pageNo: 1, pageSize: "40", bfPageNo: "", startRowNo: 1,
           totalCnt: "0", totalYn: "N", groupTotalCount: 0,
         },
-        dma_srchGdsDtlSrchInfo: { ...SEARCH_INFO_TEMPLATE, csNo },
+        dma_srchGdsDtlSrchInfo: { ...SEARCH_INFO_TEMPLATE, csNo, ...bidRange() },
       }),
     });
 

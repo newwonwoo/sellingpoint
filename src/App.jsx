@@ -837,15 +837,15 @@ export default function App() {
             </div>
 
             {/* 사건 정보 — 매물 공통 */}
-            {cData.lots[0]?.caseName && (
+            {cData.lots.find((l) => l.caseName) && (
               <div className="case-info">
                 <dl>
-                  <dt>사건명</dt><dd>{cData.lots[0].caseName}</dd>
-                  {cData.lots[0].receiptDate && <><dt>접수일</dt><dd>{ymdLabel(cData.lots[0].receiptDate)}</dd></>}
-                  {cData.lots[0].startDate && <><dt>개시결정</dt><dd>{ymdLabel(cData.lots[0].startDate)}</dd></>}
-                  {cData.lots[0].demandDeadline && <><dt>배당요구종기</dt><dd>{ymdLabel(cData.lots[0].demandDeadline)}</dd></>}
-                  {cData.lots[0].claimAmount > 0 && <><dt>청구금액</dt><dd>{fmtEok(cData.lots[0].claimAmount)}억</dd></>}
-                  {cData.lots[0].specWriteDate && <><dt>명세서 작성</dt><dd>{ymdLabel(cData.lots[0].specWriteDate)}</dd></>}
+                  <dt>사건명</dt><dd>{cData.lots.find((l) => l.caseName).caseName}</dd>
+                  {cData.lots.find((l) => l.receiptDate) && <><dt>접수일</dt><dd>{ymdLabel(cData.lots.find((l) => l.receiptDate).receiptDate)}</dd></>}
+                  {cData.lots.find((l) => l.startDate) && <><dt>개시결정</dt><dd>{ymdLabel(cData.lots.find((l) => l.startDate).startDate)}</dd></>}
+                  {cData.lots.find((l) => l.demandDeadline) && <><dt>배당요구종기</dt><dd>{ymdLabel(cData.lots.find((l) => l.demandDeadline).demandDeadline)}</dd></>}
+                  {cData.lots.find((l) => l.claimAmount > 0) && <><dt>청구금액</dt><dd>{fmtEok(cData.lots.find((l) => l.claimAmount > 0).claimAmount)}억</dd></>}
+                  {cData.lots.find((l) => l.specWriteDate) && <><dt>명세서 작성</dt><dd>{ymdLabel(cData.lots.find((l) => l.specWriteDate).specWriteDate)}</dd></>}
                 </dl>
               </div>
             )}
@@ -877,6 +877,13 @@ export default function App() {
                       : "낙찰가율을 가져오지 못했습니다"}
                     {vsMin != null && lot.rate ? ` · 최저가 대비 ${vsMin >= 0 ? "+" : ""}${vsMin.toFixed(0)}%` : ""}
                   </div>
+
+                  {lot.detailReady === false && (
+                    <div className="lot-warn">
+                      매각물건명세서가 아직 공개되지 않았습니다 — 선순위 설정일자·인수권리·청구금액을 가져올 수 없습니다.
+                      명세서는 매각기일이 가까워야 공개되므로{lot.saleDate ? ` (기일 ${ymdLabel(lot.saleDate)})` : ""} 기일 임박 후 다시 조회하세요.
+                    </div>
+                  )}
 
                   {/* 매각물건명세서 — 선순위 판단의 근거 */}
                   {(lot.seniorDate || lot.claimAmount > 0 || lot.demandDeadline) && (
