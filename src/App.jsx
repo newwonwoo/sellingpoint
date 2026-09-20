@@ -147,6 +147,19 @@ function checkRow(r) {
 }
 const isSubtotal = (name) => name === "소계" || name === "전체";
 const ymLabel = (ym) => `${String(ym).slice(0, 4)}.${String(ym).slice(4)}`;
+// 화면 탭 — 가동중 화면(조회)은 그대로 두고 새 기능은 탭으로 분리한다.
+// tools(역추적)는 74% 정체를 파려고 만든 진단 도구라 평소엔 숨기고,
+// 주소에 #tools 를 붙였을 때만 탭이 나타난다.
+const TABS = [
+  { key: "stats", label: "낙찰가율 조회" },
+  { key: "case", label: "사건번호 실익" },
+  { key: "tools", label: "역추적(진단)" },
+];
+const initialTab = () => {
+  if (typeof window === "undefined") return "stats";
+  const h = String(window.location.hash || "").replace(/^#\/?/, "");
+  return TABS.some((t) => t.key === h) ? h : "stats";
+};
 const ymdLabel = (v) => { const s = String(v || ""); return s.length === 8 ? `${s.slice(0,4)}.${s.slice(4,6)}.${s.slice(6)}` : s; };
 
 // ── 2차 MVP: 주소 → 시군구 로컬 파싱 (외부 API 키 불필요) ──
@@ -237,6 +250,22 @@ export default function App() {
   const [aSgg, setASgg] = useState("");
 
   // ── 사건번호 실익 미리보기 상태 ──
+  const [tab, setTab] = useState(initialTab);
+  // #tools 로 한 번 들어오면 그 세션 동안은 진단 탭을 계속 쓸 수 있게 둔다.
+  const [toolsUnlocked, setToolsUnlocked] = useState(
+    () => typeof window !== "undefined" && window.location.hash.includes("tools"),
+  );
+  // 주소창 해시가 바뀌어도(뒤로가기·북마크) 탭이 따라가도록 한다.
+  useEffect(() => {
+    const onHash = () => {
+      setTab(initialTab());
+      if (window.location.hash.includes("tools")) setToolsUnlocked(true);
+    };
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  const showTools = toolsUnlocked || tab === "tools";
+
   const [caseNo, setCaseNo] = useState("");
   const [cBusy, setCBusy] = useState(false);
   const [cErr, setCErr] = useState("");
@@ -669,6 +698,16 @@ export default function App() {
         <h1>법원경매 낙찰가율 조회</h1>
         <p className="sub">소재지·기간을 고르면 법원 매각통계의 용도별 매각가율(=낙찰가율)을 가져옵니다.</p>
       </header>
+      <nav className="tabs">
+        {TABS.filter((t) => t.key !== "tools" || showTools).map((t) => (
+          <button key={t.key} className={tab === t.key ? "on" : ""}
+            onClick={() => { setTab(t.key); if (typeof window !== "undefined") window.location.hash = t.key === "stats" ? "" : t.key; }}>
+            {t.label}
+          </button>
+        ))}
+      </nav>
+
+      {tab === "stats" && (<>
 
       {/* ── 2차 MVP: 주소로 최근 6개월 낙찰가율 찾기 ── */}
       <section className="panel addr">
@@ -726,6 +765,9 @@ export default function App() {
         )}
       </section>
 
+      </>)}
+
+      {tab === "case" && (<>
       <div className="section-div">사건번호로 실익 미리보기</div>
 
       <section className="panel addr">
@@ -849,6 +891,9 @@ export default function App() {
         )}
       </section>
 
+      </>)}
+
+      {tab === "stats" && (<>
       <div className="section-div">상세 통계 (지역·기간 직접 선택)</div>
 
       <section className="panel controls">
@@ -964,6 +1009,9 @@ export default function App() {
           <pre className="raw">{JSON.stringify(resp, null, 2).slice(0, 2000)}</pre></section>
       )}
 
+      </>)}
+
+      {tab === "tools" && (<>
       <div className="section-div">낙찰가율 역추적 (기간·산식 거꾸로 찾기)</div>
 
       <section className="panel controls bt">
@@ -1057,6 +1105,8 @@ export default function App() {
           )}
         </section>
       )}
+
+      </>)}
 
       <footer className="foot">출처: 대한민국 법원 법원경매정보 · 매각통계(selectRletCortDspslStats)</footer>
     </div>
