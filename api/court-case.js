@@ -416,11 +416,20 @@ async function caseDetail(cookie, csNo, courtCode) {
 //   검색 결과와 짝지어 332건을 수확했는데 20104 하나가 아파트·다세대·오피스텔·상가에
 //   모두 걸릴 만큼 충돌이 심했다. 억지로 매핑하면 엉뚱한 낙찰가율이 붙으므로 쓰지 않고,
 //   용도를 비워 '전체' 낙찰가율로 떨어뜨린 뒤 화면·엑셀에 그 사실을 표시한다.
+// ⚠ 여기도 '한 줄 = 목적물'이다. 매물에 목적물이 3개면 같은 감정가가 3줄 반복된다.
+//   그대로 매물로 세면 2026타경100137이 10.7억짜리 매물 3건(=32억)으로 보인다. 실제로 그렇게 났다.
+//   검색 경로에서 maemulSer 로 묶은 것과 같은 이유로 dspslGdsSeq 로 묶는다.
 function lotsFromCase(d) {
-  const gds = d?.dlt_dspslGdsDspslObjctLst || [];
+  const rows = (d?.dlt_dspslGdsDspslObjctLst || []).filter((g) => n(g.aeeEvlAmt) > 0);
   const objs = d?.dlt_rletCsDspslObjctLst || [];
-  return gds.filter((g) => n(g.aeeEvlAmt) > 0).map((g) => {
-    const mine = objs.filter((o) => String(o.dspslObjctSeq) === String(g.dspslObjctSeq));
+  const bySeq = new Map();
+  for (const g of rows) {
+    const key = String(g.dspslGdsSeq ?? "1");
+    if (!bySeq.has(key)) bySeq.set(key, { head: g, seqs: [] });
+    if (g.dspslObjctSeq != null) bySeq.get(key).seqs.push(String(g.dspslObjctSeq));
+  }
+  return [...bySeq.values()].map(({ head: g, seqs }) => {
+    const mine = objs.filter((o) => seqs.includes(String(o.dspslObjctSeq)));
     const use = mine.length ? mine : objs;
     return {
       lotNo: String(g.dspslGdsSeq ?? "1"),
@@ -461,6 +470,7 @@ async function diagnose(cookie, csNo, courtCode) {
   }
   if (!d) return { reason: "absent" };
   const b = d.dma_csBasInf;
+  const found = { courtCode: b.cortOfcCd || courtCode || "" };
   // 법원 화면 로직과 동일: ultmtDvsCd "000" = 미종국
   const closed = String(b.ultmtDvsCd || "000") !== "000";
   // ⚠ 자동차·선박 경매는 이 앱의 검색 조건(부동산)에 애초에 안 걸린다. 기일을 기다려도 안 나온다.
@@ -470,6 +480,7 @@ async function diagnose(cookie, csNo, courtCode) {
   //   부동산 사건을 "부동산 사건 아님"이라고 안내하는 최악의 오분류였다. 사건명을 명시한다.
   const notRealty = /자동차|선박|항공기|건설기계|유체동산/.test(b.csNm || "");
   return {
+    ...found,
     reason: closed ? "closed" : notRealty ? "not_realty" : "no_date",
     detail: d,
     court: b.cortOfcNm || "",
@@ -588,7 +599,26 @@ export default async function handler(req, res) {
       const { detail, ...d } = await diagnose(cookie, csNo, body.courtCode || "");
       // 검색엔 없어도 감정가가 있으면 그걸로 분석을 살린다. 실익 판단의 출발점이 감정가라서
       // 이게 있으면 '조회 실패'가 아니라 '자료가 덜 찬 조회 성공'이다.
-      const lots = d.reason === "closed" ? [] : lotsFromCase(detail);
+      let lots = d.reason === "closed" ? [] : lotsFromCase(detail);
+
+      // ── 중복경매(이중경매)면 감정가가 '모사건'에 있다 ──
+      // 같은 부동산에 경매가 겹쳐 들어오면 감정평가는 먼저 들어온 사건(모사건)에서만 한다.
+      // 자식 사건은 감정가가 통째로 비어 있고, 사건내역의 dlt_dpcnMrgTrnscsCsRlet 가 모사건을 가리킨다.
+      // 실측: 감정가 없던 미종국 부동산 52건 중 2건이 중복경매였고 2건 다 모사건에서 회수됐다.
+      //   2026타경100115 ← 2024타경124852 (반포자이, 49.6억)
+      //   2026타경100137 ← 2024타경2099  (종로 효제동, 10.7억)
+      // ⚠ 다른 사건번호의 값이므로 반드시 출처를 밝힌다. 조용히 갖다 쓰면 숫자를 믿을 수 없게 된다.
+      let parentCase = "";
+      if (!lots.length && d.reason !== "closed") {
+        const mrg = (detail?.dlt_dpcnMrgTrnscsCsRlet || []).find((x) => x.userReltCsNo);
+        if (mrg) {
+          const pNo = normalizeCaseNo(mrg.userReltCsNo) || String(mrg.userReltCsNo).trim();
+          const pDetail = await caseDetail(cookie, pNo, mrg.reltCortOfcCd || d.courtCode);
+          const pLots = lotsFromCase(pDetail);
+          if (pLots.length) { lots = pLots; parentCase = pNo; }
+        }
+      }
+
       if (lots.length) {
         const courtCode = lots[0].courtCode;
         const survey = await fetchSurvey(cookie, csNo, courtCode);
@@ -598,6 +628,7 @@ export default async function handler(req, res) {
         return res.status(200).json({
           caseNo: csNo, found: true,
           partial: true, partialReason: d.reason,   // 어디서 왔는지 화면이 밝혀야 한다
+          parentCase,                                // 모사건에서 가져왔으면 그 사건번호
           court: d.court || "", dept: d.dept || "", tel: "",
           objectCount: lots.reduce((s, l) => s + l.objects.length, 0),
           courtConflict: false, survey, caseInfo, appraisal, lots,

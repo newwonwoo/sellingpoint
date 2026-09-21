@@ -221,6 +221,8 @@ export function caseRows(data, input) {
     if (data.courtConflict) flags.push("동일 사건번호가 여러 법원에 있음 — 법원 확인 필요");
     // 검색에 안 잡혀 사건내역에서 감정가만 건져온 매물. 없는 값이 많다는 걸 반드시 알려야 한다.
     if (data.partial) flags.push("매각물건 검색 미노출 — 사건내역의 감정가로 계산(면적·유찰·명세서·용도 없음, 낙찰가율은 시군구 전체)");
+    // 다른 사건번호의 감정가를 쓴 것이라 반드시 밝힌다.
+    if (data.parentCase) flags.push(`중복경매 — 감정가·소재지는 모사건 ${data.parentCase}의 값`);
     if (lot.usageMix?.length > 1) flags.push(`용도 혼재 ${lot.usageMix.join(" ")}`);
     // ⚠ 한 사건에 매물이 여럿이면 우리 채권액을 매물마다 그대로 적용한다(매물별 시나리오).
     //   칼럼을 세로로 더하면 같은 채권을 여러 번 세게 된다. 파일에 못 박아 둔다.
