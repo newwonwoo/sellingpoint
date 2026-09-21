@@ -31,9 +31,9 @@ const MAX_PAGES = 10;    // 목적물 400건. 한 사건이 이보다 클 일은
 //   종결됐을 뿐인 경우가 많다. 사건내역 API(pgj15A)는 종결 사건도 돌려주므로 이걸로 사유를 가른다.
 //   판정 기준은 법원 화면 로직 그대로다 — ultmtDvsCd 가 "000"이면 미종국, 아니면 종국.
 //
-//   검색 0건 + 사건 있음 + 종국    → closed        종결된 사건
-//   검색 0건 + 사건 있음 + 미종국  → no_date       진행 중이나 잡힌 매각기일이 없음
-//   검색 0건 + 어느 법원에도 없음  → absent        사건번호가 틀렸다(여기서만 입력을 의심한다)
+//   유형은 src/caseModel.js 의 NOT_FOUND_LABEL 과 같다:
+//     closed 종결 / not_realty 부동산 아님 / suspended 집행정지 / appealed 항고 /
+//     no_appraisal 감정가 미공개 / absent 번호 없음(여기서만 입력을 의심한다)
 //
 // ⚠ 사건내역은 법원코드가 필수다(빈 값·부분 값 모두 안 받는다). 검색이 실패해 법원을 모르므로
 //   전 법원을 훑는다. 실측 최악 1.6초(51곳 전부), 보통 0.3~1초(먼저 걸리면 조기 종료).
@@ -479,9 +479,21 @@ async function diagnose(cookie, csNo, courtCode) {
   // ⚠ '동산'을 그냥 넣으면 안 된다 — "부동산강제경매"가 통째로 걸린다(실제로 그렇게 났다).
   //   부동산 사건을 "부동산 사건 아님"이라고 안내하는 최악의 오분류였다. 사건명을 명시한다.
   const notRealty = /자동차|선박|항공기|건설기계|유체동산/.test(b.csNm || "");
+  const suspended = SUSPENDED.has(String(b.auctnSuspStatCd || ""));
+  const appealed = b.rletApalYn === "Y";
+  // 감정가가 없는 이유를 '확실한 근거가 있는 것부터' 고른다.
+  // 마지막 no_appraisal 은 "법원이 아직 감정가를 안 냈다"는 사실만 말한다 — 왜 안 냈는지는
+  // 법원이 공개하지 않는다.
+  // ⚠ '접수 직후라 감정 전'이 아니다. 표본 35건이 전부 개시 8~9개월 지난 사건이었다.
+  //   기다리면 나온다고 단정하면 안 된다.
+  const reason = closed ? "closed"
+    : notRealty ? "not_realty"
+      : suspended ? "suspended"
+        : appealed ? "appealed"
+          : "no_appraisal";
   return {
     ...found,
-    reason: closed ? "closed" : notRealty ? "not_realty" : "no_date",
+    reason,
     detail: d,
     court: b.cortOfcNm || "",
     dept: b.cortAuctnJdbnNm || "",

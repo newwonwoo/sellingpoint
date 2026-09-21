@@ -7,7 +7,7 @@ import { courtSggCodes, dedupeSggOptions } from "./courtCodes";
 import { groupRows, matchUsageRow } from "./statsModel.js";
 import { bucketMonth, categoriesOf, findWindows, monthRange, referenceGrid, shiftYM } from "./backtrack.js";
 import {
-  benefitOf, extractAmounts, monthsBetween, NOT_FOUND_LABEL, notFoundText, num, opposability,
+  benefitOf, extractAmounts, monthsBetween, NO_PRICE_REASONS, NOT_FOUND_LABEL, notFoundText, num, opposability,
   scopeTenants, TAX_PARTY, VERDICT_LABEL, ymdLabel,
 } from "./caseModel.js";
 import { buildResultBook, buildTemplateBook, caseRows, failRow, MAX_CASES, OUT_COLS, readCaseInputs, saveBook } from "./caseSheet.js";
@@ -271,7 +271,7 @@ async function fetchCaseAnalyzed(caseNo, startYM, endYM, rateCache, signal) {
   const data = await r.json();
   if (!r.ok) throw new Error([data.error, data.hint].filter(Boolean).join(" — ") || `조회 실패 (${r.status})`);
   if (!data.lots?.length) {
-    // 서버가 사건내역까지 확인해 사유(closed/no_date/absent)를 붙여 보낸다.
+    // 서버가 사건내역까지 확인해 감정가가 없는 사유를 붙여 보낸다(NOT_FOUND_LABEL 참고).
     const e = new Error(notFoundText(data));
     e.reason = data.reason || "error";
     e.caseStatus = data;
@@ -955,9 +955,9 @@ export default function App() {
         <div className="addr-hint">감정평가액 · 청구금액 · 최선순위 설정일자 · 인수권리를 법원 매각물건명세서에서 가져옵니다</div>
 
         {cErr && (
-          <div className={`status ${["closed","no_date","not_realty"].includes(cReason) ? "warn" : "err"}`}>
+          <div className={`status ${NO_PRICE_REASONS.has(cReason) ? "warn" : "err"}`}>
             <b>{NOT_FOUND_LABEL[cReason] || "조회 실패"}</b> — {cErr}
-            {["closed","no_date","not_realty"].includes(cReason) && (
+            {NO_PRICE_REASONS.has(cReason) && (
               <div className="nf-note">
                 매각물건 검색은 <b>지금 매각이 진행 중인 물건 목록</b>이라 사건이 있어도 여기 안 나옵니다.
                 사건 자체는 법원에 있습니다.
@@ -985,7 +985,7 @@ export default function App() {
             {cData.partial && (
               <div className="lot-warn">
                 이 사건은 <b>매각물건 검색에 아직 나오지 않습니다</b>
-                {cData.partialReason === "no_date" ? " (매각기일 공고 전)" : ""}.
+                {cData.partialReason === "no_appraisal" ? " (매각기일 공고 전)" : ""}.
                 법원 <b>사건내역</b>에서 감정평가액을 가져와 계산했습니다.
                 {cData.parentCase && (
                   <div className="lw-sub">
