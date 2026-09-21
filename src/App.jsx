@@ -7,7 +7,7 @@ import { courtSggCodes, dedupeSggOptions } from "./courtCodes";
 import { groupRows, matchUsageRow } from "./statsModel.js";
 import { bucketMonth, categoriesOf, findWindows, monthRange, referenceGrid, shiftYM } from "./backtrack.js";
 import {
-  benefitOf, extractAmounts, monthsBetween, num, opposability,
+  benefitOf, extractAmounts, monthsBetween, NOT_FOUND_LABEL, notFoundText, num, opposability,
   scopeTenants, TAX_PARTY, VERDICT_LABEL, ymdLabel,
 } from "./caseModel.js";
 import { buildResultBook, buildTemplateBook, caseRows, failRow, MAX_CASES, OUT_COLS, readCaseInputs, saveBook } from "./caseSheet.js";
@@ -271,7 +271,11 @@ async function fetchCaseAnalyzed(caseNo, startYM, endYM, rateCache, signal) {
   const data = await r.json();
   if (!r.ok) throw new Error([data.error, data.hint].filter(Boolean).join(" — ") || `조회 실패 (${r.status})`);
   if (!data.lots?.length) {
-    throw new Error("물건을 찾지 못했습니다. 사건번호를 확인해주세요. (기일이 지났거나 취하·종결된 사건은 조회되지 않습니다)");
+    // 서버가 사건내역까지 확인해 사유(closed/no_date/absent)를 붙여 보낸다.
+    const e = new Error(notFoundText(data));
+    e.reason = data.reason || "error";
+    e.caseStatus = data;
+    throw e;
   }
   for (const lot of data.lots) {
     const rr = await resolveRate(lot, startYM, endYM, rateCache);
@@ -337,6 +341,8 @@ export default function App() {
   const [caseNo, setCaseNo] = useState("");
   const [cBusy, setCBusy] = useState(false);
   const [cErr, setCErr] = useState("");
+  // 조회 안 된 사유. 종결 사건은 오류가 아니라 정보라서 빨강으로 띄우면 안 된다.
+  const [cReason, setCReason] = useState("");
   const [cData, setCData] = useState(null);
   // 매물별 실익 입력 { [lotNo]: {claim, senior, assumed, cost} }
   const [cCalc, setCCalc] = useState({});
@@ -706,7 +712,7 @@ export default function App() {
   async function runCaseLookup() {
     const no = caseNo.trim();
     if (!no) { setCErr("사건번호를 입력하세요 (예: 2024타경115858)"); return; }
-    setCBusy(true); setCErr(""); setCData(null); setCCalc({});
+    setCBusy(true); setCErr(""); setCReason(""); setCData(null); setCCalc({});
     try {
       const { startYM, endYM } = ratePeriod();
       const data = await fetchCaseAnalyzed(no, startYM, endYM, new Map());
@@ -718,7 +724,7 @@ export default function App() {
       }
       setCCalc(prefill);
       setCData({ ...data, period: `${ymLabel(startYM)}~${ymLabel(endYM)}` });
-    } catch (e) { setCErr(String(e.message || e)); }
+    } catch (e) { setCErr(String(e.message || e)); setCReason(e.reason || "error"); }
     finally { setCBusy(false); }
   }
 
@@ -765,7 +771,9 @@ export default function App() {
             chunks[i] = caseRows(data, it);     // 여기서 응답을 행으로 접고
           } catch (e) {                          // data 참조가 끊긴다 → 다음 건 전에 회수된다
             fail++;
-            chunks[i] = [failRow(it.caseNo, it, String(e.message || e))];
+            // 사유(종결/매각기일 없음/번호 오류)를 그대로 넘겨 실익판정 칸에 찍는다.
+            // 전부 "조회 실패"로 뭉치면 담당자가 다시 한 건씩 봐야 한다.
+            chunks[i] = [failRow(it.caseNo, it, String(e.message || e), e.reason, e.caseStatus)];
           }
           done++;
           setBProg({ done, total: items.length, fail });
@@ -791,7 +799,8 @@ export default function App() {
       const skipped = cancel.stop ? items.length - done : 0;
       setBMsg(
         `완료 · 사건 ${done}건 / 결과 ${rows.length}행` +
-        (fail ? ` · 조회 실패 ${fail}건(파일에 사유가 적힙니다)` : "") +
+        // 종결·기일없음은 실패가 아니라 유효한 결과다. "실패"로 뭉뚱그리면 담당자가 다시 찾아본다.
+        (fail ? ` · 분석 못 한 사건 ${fail}건 — 사유는 파일 '실익판정' 칸에` : "") +
         (skipped ? ` · 중지로 건너뛴 ${skipped}건` : "") +
         (parsed.stats.dupes ? ` · 중복 사건번호 ${parsed.stats.dupes}건 제외` : "") +
         (parsed.stats.mode === "scan" ? " · 사건번호 칼럼을 못 찾아 시트 전체에서 주워 담았습니다(채권액 등 부가 칼럼 미적용)" : ""),
@@ -945,7 +954,17 @@ export default function App() {
         </div>
         <div className="addr-hint">감정평가액 · 청구금액 · 최선순위 설정일자 · 인수권리를 법원 매각물건명세서에서 가져옵니다</div>
 
-        {cErr && <div className="status err">{cErr}</div>}
+        {cErr && (
+          <div className={`status ${["closed","no_date","not_realty"].includes(cReason) ? "warn" : "err"}`}>
+            <b>{NOT_FOUND_LABEL[cReason] || "조회 실패"}</b> — {cErr}
+            {["closed","no_date","not_realty"].includes(cReason) && (
+              <div className="nf-note">
+                매각물건 검색은 <b>지금 매각이 진행 중인 물건 목록</b>이라 사건이 있어도 여기 안 나옵니다.
+                사건 자체는 법원에 있습니다.
+              </div>
+            )}
+          </div>
+        )}
 
         {cData && (
           <div className="addr-result">
@@ -960,6 +979,18 @@ export default function App() {
               <div className="lot-warn">
                 같은 사건번호가 <b>여러 법원</b>에 있습니다 ({cData.court}). 사건번호의 연도·일련번호는 법원별로 따로 돌아가므로
                 아래 매물에 다른 법원 사건이 섞여 있습니다 — 법원을 확인하고 해당 매물만 보세요.
+              </div>
+            )}
+            {/* 검색에 안 잡혀 사건내역에서 감정가만 건져온 경우 — 어디서 온 값인지 밝힌다 */}
+            {cData.partial && (
+              <div className="lot-warn">
+                이 사건은 <b>매각물건 검색에 아직 나오지 않습니다</b>
+                {cData.partialReason === "no_date" ? " (매각기일 공고 전)" : ""}.
+                법원 <b>사건내역</b>에서 감정평가액을 가져와 계산했습니다.
+                <div className="lw-sub">
+                  없는 값: 면적 · 유찰횟수 · 매각물건명세서(최선순위·인수권리·청구금액) · 물건 용도.
+                  용도를 모르므로 낙찰가율은 그 시군구 <b>전체</b> 값을 적용했습니다 — 공고가 나면 다시 조회하세요.
+                </div>
               </div>
             )}
             {/* 매물 전체에 똑같이 해당하는 경고는 여기서 한 번만 말한다(카드에서는 생략된다) */}
@@ -1072,12 +1103,15 @@ export default function App() {
                     {lot.objects.length > 1 && <span className="lot-more"> 외 {lot.objects.length - 1}건</span>}
                   </div>
                   <div className="lot-meta">
-                    {lot.usage} · {fmtInt(lot.areaSum)}㎡ · 유찰 {lot.failCount}회
+                    {/* 사건내역에서 온 매물은 면적·유찰횟수가 없다. 0으로 찍으면 '유찰 0회'라는
+                        거짓말이 되므로 '-'로 둔다. */}
+                    {lot.usage || "용도 미상"} · {lot.areaSum == null ? "면적 -" : `${fmtInt(lot.areaSum)}㎡`}
+                    {lot.failCount == null ? " · 유찰 -" : ` · 유찰 ${lot.failCount}회`}
                     {lot.saleDate ? ` · 매각기일 ${lot.saleDate.slice(0, 4)}.${lot.saleDate.slice(4, 6)}.${lot.saleDate.slice(6)}` : ""}
                   </div>
                   <div className="lot-nums">
                     <div><span>감정가</span><b>{fmtEok(lot.appraisal)}억</b></div>
-                    <div><span>최저가</span><b>{fmtEok(lot.minPrice)}억</b></div>
+                    <div><span>최저가</span><b>{lot.minPrice ? `${fmtEok(lot.minPrice)}억` : "-"}</b></div>
                     <div><span>낙찰가율</span><b>{lot.rate ? `${lot.rate.toFixed(1)}%` : "-"}</b></div>
                     <div className="hero"><span>예상낙찰가</span><b>{lot.rate ? `${fmtEok(lot.expected)}억` : "-"}</b></div>
                   </div>
@@ -1088,7 +1122,8 @@ export default function App() {
                     {vsMin != null && lot.rate ? ` · 최저가 대비 ${vsMin >= 0 ? "+" : ""}${vsMin.toFixed(0)}%` : ""}
                   </div>
 
-                  {lot.detailReady === false && !caseWide.unready && (
+                  {/* partial 이면 위 배너가 이미 "명세서 없음"을 말했다 — 두 번 말하지 않는다 */}
+                  {lot.detailReady === false && !caseWide.unready && !cData.partial && (
                     <div className="lot-warn">
                       매각물건명세서가 아직 공개되지 않았습니다 — 선순위 설정일자·인수권리·청구금액을 가져올 수 없습니다.
                       명세서는 매각기일이 가까워야 공개되므로{lot.saleDate ? ` (기일 ${ymdLabel(lot.saleDate)})` : ""} 기일 임박 후 다시 조회하세요.
@@ -1318,7 +1353,7 @@ export default function App() {
             <div className="bx-bar"><i style={{ width: `${Math.round(bProg.done / bProg.total * 100)}%` }} /></div>
             <div className="bx-prog-t">
               {bProg.done} / {bProg.total} 사건
-              {bProg.fail ? <b className="bx-fail"> · 실패 {bProg.fail}</b> : null}
+              {bProg.fail ? <b className="bx-fail"> · 분석 못 함 {bProg.fail}</b> : null}
               {" · 건당 3~8초 걸립니다"}
             </div>
           </div>

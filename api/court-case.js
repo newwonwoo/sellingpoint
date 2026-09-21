@@ -17,8 +17,45 @@ const SURVEY_PATH = "/pgj/pgj15B/selectCurstExmndc.on";       // 현황조사서
 const PARTY_PATH  = "/pgj/pgj15A/selectAuctnCsSrchRslt.on";   // 사건내역 (이해관계인·관련사건·항고)
 const APPRAISAL_PATH = "/pgj/pgj15B/selectAeeWevlInfo.on";    // 감정평가서 (가격시점·평가사)
 const SEED_PATH = "/pgj/index.on?w2xPath=/pgj/ui/pgj100/PGJ151F00.xml";
-const PAGE_SIZE = 40;    // 사이트와 동일
+const PAGE_SIZE = 40;    // 사이트와 동일. ⚠ 1 같은 작은 값을 주면 서버가 0건으로 돌려준다.
 const MAX_PAGES = 10;    // 목적물 400건. 한 사건이 이보다 클 일은 없다(상한이 없으면 무한루프 위험)
+
+// ── 조회되는 사건과 안 되는 사건 ──────────────────────────────
+// [핵심] searchControllerMain.on 은 '지금 매각 진행 중인 물건 목록'이지 사건 아카이브가 아니다.
+//   그래서 조회되는 조건은 딱 하나다 — "앞으로 잡힌 매각기일이 있는 부동산 매물이 이 사건에 있다".
+//   종결된 사건은 기일 범위를 어떻게 줘도 안 나온다.
+//   실측(2016타경5000, 종국 2016.07.26): 오늘~+10년 0건 / 2016년 0건 / 2006~2036 0건 /
+//   종국 직전 한 달 0건 / 법원코드까지 지정해도 0건.
+//
+// [그래서] 0건이 왔을 때 "사건번호를 확인하세요"라고 하면 대개 틀린 말이다. 사건은 멀쩡히 있고
+//   종결됐을 뿐인 경우가 많다. 사건내역 API(pgj15A)는 종결 사건도 돌려주므로 이걸로 사유를 가른다.
+//   판정 기준은 법원 화면 로직 그대로다 — ultmtDvsCd 가 "000"이면 미종국, 아니면 종국.
+//
+//   검색 0건 + 사건 있음 + 종국    → closed        종결된 사건
+//   검색 0건 + 사건 있음 + 미종국  → no_date       진행 중이나 잡힌 매각기일이 없음
+//   검색 0건 + 어느 법원에도 없음  → absent        사건번호가 틀렸다(여기서만 입력을 의심한다)
+//
+// ⚠ 사건내역은 법원코드가 필수다(빈 값·부분 값 모두 안 받는다). 검색이 실패해 법원을 모르므로
+//   전 법원을 훑는다. 실측 최악 1.6초(51곳 전부), 보통 0.3~1초(먼저 걸리면 조기 종료).
+//
+// 법원코드 목록 — 매각기일별 검색에 cortOfcCd 를 넣어 B000200~B000799 를 훑어 얻었다(51곳).
+// ⚠ '지금 진행 물건이 있는 법원'만 잡힌다. 물건이 하나도 없는 지원은 빠질 수 있다.
+//    다시 만들려면 같은 방법으로 코드 범위를 훑으면 된다(pageSize 는 반드시 40).
+const COURT_CODES = [
+  "B000210", "B000211", "B000212", "B000213", "B000214", "B000215",
+  "B000240", "B000241",
+  "B000250", "B000251", "B000252", "B000253", "B000254",
+  "B000260", "B000261", "B000262", "B000263", "B000264",
+  "B000270", "B000271", "B000272",
+  "B000280", "B000281", "B000282", "B000283", "B000284", "B000285",
+  "B000310", "B000311", "B000312", "B000313", "B000315", "B000317", "B000320",
+  "B000410", "B000411", "B000412", "B000414",
+  "B000420", "B000421", "B000423", "B000424", "B000431",
+  "B000510", "B000511", "B000513", "B000514",
+  "B000520", "B000521", "B000523",
+  "B000530",
+];
+const PROBE_BATCH = 10;   // 한 번에 10곳씩. 51곳을 한꺼번에 던지면 법원 서버가 막는다.
 
 // 검색 본문 템플릿(필드 ~60개). 부분만 보내면 서버가 거절하므로 전체를 보낸다.
 const SEARCH_INFO_TEMPLATE = {
@@ -348,6 +385,106 @@ async function fetchAppraisal(cookie, csNo, courtCode) {
   } catch { return null; }
 }
 
+// 사건내역 원본. 종결 사건도 돌려준다 — 검색과 다른 점이 이것이다.
+async function caseDetail(cookie, csNo, courtCode) {
+  try {
+    const r = await fetch(BASE + PARTY_PATH, {
+      method: "POST",
+      headers: {
+        ...browserHeaders(),
+        "Content-Type": "application/json;charset=UTF-8",
+        Referer: BASE + "/pgj/index.on?w2xPath=/pgj/ui/pgj100/PGJ15AF01.xml",
+        "SC-Userid": "SYSTEM", "SC-Pgmid": "PGJ15AF01", Cookie: cookie,
+      },
+      body: JSON.stringify({ dma_srchCsDtlInf: { csNo, cortOfcCd: courtCode, pgmId: "PGJ15AF01", srchInfo: {} } }),
+    });
+    if (r.status !== 200) return null;
+    const d = (await r.json())?.data;
+    return d?.dma_csBasInf ? d : null;
+  } catch { return null; }
+}
+
+// ── 검색에 안 잡히는 사건의 감정가 ────────────────────────────
+// 사건내역의 dlt_dspslGdsDspslObjctLst 에 매물별 감정가가 들어 있다. 이게 검색보다 넓다.
+//   실측(서울중앙 미종국 부동산 13건): 감정가 있고 검색됨 6 / 감정가 있는데 검색 0건 7.
+//   절반 넘게가 '감정은 끝났는데 아직 공고 전'이라 검색에만 안 잡히던 것이다.
+// ⚠ 종국된 사건은 이 데이터셋도 0건이다(종국 26건 전부 0건 — 종국 10일 지난 건도 0건).
+//   즉 이 경로로 살릴 수 있는 건 '미종국 + 감정평가 완료' 사건이다. 종결 사건은 못 살린다.
+// ⚠ 여기엔 면적·유찰횟수가 없고 매각물건명세서도 안 열린다. 없는 값을 0으로 채우면
+//   "유찰 0회"처럼 읽혀 거짓말이 되므로 null 로 두고 화면에서 '-'로 표시한다.
+// ⚠ 용도는 3단계 코드(20000/20100/20104)로만 온다. 코드→이름 표를 만들어 보려고
+//   검색 결과와 짝지어 332건을 수확했는데 20104 하나가 아파트·다세대·오피스텔·상가에
+//   모두 걸릴 만큼 충돌이 심했다. 억지로 매핑하면 엉뚱한 낙찰가율이 붙으므로 쓰지 않고,
+//   용도를 비워 '전체' 낙찰가율로 떨어뜨린 뒤 화면·엑셀에 그 사실을 표시한다.
+function lotsFromCase(d) {
+  const gds = d?.dlt_dspslGdsDspslObjctLst || [];
+  const objs = d?.dlt_rletCsDspslObjctLst || [];
+  return gds.filter((g) => n(g.aeeEvlAmt) > 0).map((g) => {
+    const mine = objs.filter((o) => String(o.dspslObjctSeq) === String(g.dspslObjctSeq));
+    const use = mine.length ? mine : objs;
+    return {
+      lotNo: String(g.dspslGdsSeq ?? "1"),
+      courtCode: g.cortOfcCd || "",
+      sido: g.adongSdNm || "", sigungu: g.adongSggNm || "", dong: g.adongEmdNm || "",
+      sidoCode: g.rprsAdongSdCd || "", sigunguCode: g.rprsAdongSggCd || "",
+      appraisal: n(g.aeeEvlAmt),
+      minPrice: n(g.fstPbancLwsDspslPrc) || null,   // 공고 전이면 최저가도 없다
+      minRate: 0,
+      failCount: null,               // 사건내역엔 유찰횟수가 없다. 0으로 채우지 않는다.
+      areaSum: null,                 // 면적도 없다.
+      saleDate: g.dspslDxdyYmd || "",
+      place: "", specialCond: "",
+      note: g.dspslGdsRmk || "",
+      usage: "", usageMix: [],       // 용도코드는 신뢰할 수 없어 비운다(→ 전체 낙찰가율)
+      usageCode: [g.lclDspslGdsLstUsgCd, g.mclDspslGdsLstUsgCd, g.sclDspslGdsLstUsgCd].filter(Boolean).join("/"),
+      objects: use.map((o) => ({
+        seq: String(o.dspslObjctSeq ?? ""),
+        jibun: o.rprsLtnoAddr || "", building: o.bldNm || "",
+        unit: o.bldDtlDts || "", usage: o.auctnLstNm || "", area: 0,
+      })),
+    };
+  });
+}
+
+// 검색이 0건일 때 사유를 가른다. courtCode 를 알면 한 번, 모르면 전 법원을 훑는다.
+async function diagnose(cookie, csNo, courtCode) {
+  let d = null;
+  if (courtCode) {
+    d = await caseDetail(cookie, csNo, courtCode);
+  } else {
+    for (let i = 0; i < COURT_CODES.length && !d; i += PROBE_BATCH) {
+      const hits = await Promise.all(
+        COURT_CODES.slice(i, i + PROBE_BATCH).map((c) => caseDetail(cookie, csNo, c)),
+      );
+      d = hits.find(Boolean) || null;
+    }
+  }
+  if (!d) return { reason: "absent" };
+  const b = d.dma_csBasInf;
+  // 법원 화면 로직과 동일: ultmtDvsCd "000" = 미종국
+  const closed = String(b.ultmtDvsCd || "000") !== "000";
+  // ⚠ 자동차·선박 경매는 이 앱의 검색 조건(부동산)에 애초에 안 걸린다. 기일을 기다려도 안 나온다.
+  //   구분은 사건명으로만 된다 — mvprpRletDvsCd 는 자동차 사건도 "00031R"(부동산)로 온다(실측).
+  //   종국이면 '종결'이 더 실질적인 정보라 그쪽을 먼저 본다.
+  // ⚠ '동산'을 그냥 넣으면 안 된다 — "부동산강제경매"가 통째로 걸린다(실제로 그렇게 났다).
+  //   부동산 사건을 "부동산 사건 아님"이라고 안내하는 최악의 오분류였다. 사건명을 명시한다.
+  const notRealty = /자동차|선박|항공기|건설기계|유체동산/.test(b.csNm || "");
+  return {
+    reason: closed ? "closed" : notRealty ? "not_realty" : "no_date",
+    detail: d,
+    court: b.cortOfcNm || "",
+    dept: b.cortAuctnJdbnNm || "",
+    caseName: b.csNm || "",
+    receiptDate: b.csRcptYmd || "",
+    startDate: b.csCmdcYmd || "",
+    closedDate: b.csUltmtYmd || "",
+    claimAmount: n(b.clmAmt),
+    appealed: b.rletApalYn === "Y",
+    suspended: SUSPENDED.has(String(b.auctnSuspStatCd || "")),
+    suspendReason: b.csProgSuspRsn || "",
+  };
+}
+
 // 검색 한 페이지. pageSize 40 고정(사이트와 동일). totalCnt 를 같이 돌려준다.
 async function searchPage(cookie, csNo, pageNo, totalCnt) {
   const r = await fetch(BASE + SEARCH_PATH, {
@@ -444,6 +581,32 @@ export default async function handler(req, res) {
       uniq.push(x);
     }
     rows = null;
+
+    // 0건이면 왜 0건인지까지 알아내서 돌려준다. 여기서 끝내지 않으면 화면이
+    // "사건번호를 확인하세요"라고만 하게 되는데, 대개 사건은 멀쩡하고 종결됐을 뿐이다.
+    if (!uniq.length) {
+      const { detail, ...d } = await diagnose(cookie, csNo, body.courtCode || "");
+      // 검색엔 없어도 감정가가 있으면 그걸로 분석을 살린다. 실익 판단의 출발점이 감정가라서
+      // 이게 있으면 '조회 실패'가 아니라 '자료가 덜 찬 조회 성공'이다.
+      const lots = d.reason === "closed" ? [] : lotsFromCase(detail);
+      if (lots.length) {
+        const courtCode = lots[0].courtCode;
+        const survey = await fetchSurvey(cookie, csNo, courtCode);
+        const caseInfo = await fetchParties(cookie, csNo, courtCode);
+        const appraisal = await fetchAppraisal(cookie, csNo, courtCode);
+        for (const lot of lots) { lot.detailReady = false; delete lot.courtCode; }
+        return res.status(200).json({
+          caseNo: csNo, found: true,
+          partial: true, partialReason: d.reason,   // 어디서 왔는지 화면이 밝혀야 한다
+          court: d.court || "", dept: d.dept || "", tel: "",
+          objectCount: lots.reduce((s, l) => s + l.objects.length, 0),
+          courtConflict: false, survey, caseInfo, appraisal, lots,
+          caseName: d.caseName, receiptDate: d.receiptDate, claimAmount: d.claimAmount,
+        });
+      }
+      return res.status(200).json({ caseNo: csNo, found: false, lots: [], ...d });
+    }
+
     const head = uniq[0] || {};
     // ⚠ 사건번호의 연도·일련번호는 법원별로 따로 돌아간다. 법원코드를 안 주고 검색하므로
     //   같은 번호가 두 법원에 있으면 두 사건이 섞여 온다. 합쳐서 계산하면 안 되니 알린다.
@@ -471,6 +634,7 @@ export default async function handler(req, res) {
 
     return res.status(200).json({
       caseNo: csNo,
+      found: true,
       court: courtNames.join(" / ") || "",
       dept: head.jpDeptNm || "",
       tel: head.tel || "",
