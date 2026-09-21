@@ -63,41 +63,55 @@ export function monthsBetween(ymdA, ymdB) {
 export const TAX_PARTY = new Set(["교부권자", "압류권자"]);
 export const ymdLabel = (v) => { const s = String(v || ""); return s.length === 8 ? `${s.slice(0, 4)}.${s.slice(4, 6)}.${s.slice(6)}` : s; };
 
-// ── 조회 안 된 사건의 사유 ──────────────────────────────────
-// 매각물건 검색은 '지금 매각 진행 중인 물건 목록'이라, 사건이 멀쩡히 있어도 종결됐거나
-// 매각기일이 안 잡혀 있으면 0건이 온다. 이때 "사건번호를 확인하세요"는 대개 틀린 안내다.
-// api/court-case.js 가 사건내역으로 가려낸 reason 을 사람 말로 옮긴다.
-//   closed     종결 — 실익분석 대상이 아니다
-//   no_date    사건은 진행 중인데 잡힌 매각기일이 없다(기일 미정·변경·취소, 집행정지 등)
-//   not_realty 자동차·선박 경매 — 이 앱은 부동산만 본다. 기다려도 안 나온다
-//   absent     어느 법원에도 없다 — 이때만 입력을 의심한다
+// ── 감정가가 없는 경우 (유형) ──────────────────────────────
+// 매각물건 검색은 '지금 매각 진행 중인 물건 목록'이라, 사건이 멀쩡히 있어도 0건이 온다.
+// 이때 "사건번호를 확인하세요"는 대개 틀린 안내다. api/court-case.js 가 사건내역으로
+// 가려낸 reason 을 사람 말로 옮긴다.
+// 확실한 근거가 있는 것부터 고른다. 담당자가 할 일이 유형마다 완전히 다르다.
+//   closed       종결        ultmtDvsCd ≠ 000. 법원이 종국 사건의 물건정보를 닫는다. 확정적으로 못 가져온다
+//   not_realty   부동산 아님  사건명이 자동차·선박·건설기계·유체동산. 이 도구 대상이 아니다
+//   suspended    집행정지    auctnSuspStatCd 01·02. 절차가 멈춰 있다
+//   appealed     항고 중     rletApalYn = Y. 매각이 지연된다
+//   no_appraisal 감정가 미공개 위 어디에도 안 걸리는 미종국 사건. 법원이 아직 감정가를 안 냈다
+//   absent       번호 없음    전국 51개 법원에 없다 — 이때만 입력을 의심한다
+//
+// ⚠ no_appraisal 을 '접수 직후라 감정 전'이라고 말하면 안 된다. 실측 표본 35건이 전부
+//   개시 8~9개월 지난 사건이었다(2026년 1월 접수분 구간). 왜 안 나왔는지는 법원이 공개하지
+//   않으므로 '아직 안 나왔다'는 사실만 말하고, 곧 나온다고 기대하게 만들지 않는다.
 export const NOT_FOUND_LABEL = {
   closed: "종결된 사건",
-  no_date: "매각기일 없음",
+  suspended: "집행정지",
+  appealed: "항고 중",
+  no_appraisal: "감정가 미공개",
   not_realty: "부동산 사건 아님",
   absent: "사건번호 확인 필요",
   error: "조회 실패",
 };
+// 감정가가 없는 유형인가 (사건은 실재하지만 값을 못 가져오는 경우)
+export const NO_PRICE_REASONS = new Set(["closed", "suspended", "appealed", "no_appraisal", "not_realty"]);
 export function notFoundText(d) {
-  const where = [d?.court, d?.dept].filter(Boolean).join(" ");
-  if (d?.reason === "closed") {
-    return `${where ? where + " " : ""}${d.caseName || "사건"} — ${d.closedDate ? `${ymdLabel(d.closedDate)}에 ` : ""}종결된 사건입니다.`
-      + " 매각이 끝났거나 취하·기각된 사건이라 매각물건 검색에 나오지 않습니다. 실익분석 대상이 아닙니다.";
+  // "서울중앙지방법원 경매7계 부동산강제경매" — 어느 사건 얘기인지 먼저 못박는다
+  const who = [d?.court, d?.dept, d?.caseName].filter(Boolean).join(" ") || "이 사건";
+  switch (d?.reason) {
+    case "closed":
+      return `${who} — ${d.closedDate ? `${ymdLabel(d.closedDate)}에 ` : ""}종결된 사건입니다.`
+        + " 매각이 끝났거나 취하·기각됐습니다. 법원이 종결 사건의 물건정보를 닫아 감정가를 가져올 수 없습니다.";
+    case "suspended":
+      return `${who} — 집행정지 상태입니다${d.suspendReason ? ` (${d.suspendReason})` : ""}.`
+        + " 절차가 멈춰 있어 감정가·매각기일이 공개되지 않습니다. 정지가 풀리면 조회됩니다.";
+    case "appealed":
+      return `${who} — 항고가 제기돼 매각이 지연되고 있습니다. 감정가가 아직 공개되지 않았습니다.`;
+    case "no_appraisal":
+      return `${who} — 사건은 진행 중이지만 법원이 아직 감정가를 공개하지 않았습니다`
+        + `${d.startDate ? ` (개시 ${ymdLabel(d.startDate)})` : ""}. 매각기일도 잡혀 있지 않습니다.`
+        + " 사유는 법원이 공개하지 않습니다. 개시 8~9개월이 지난 사건에도 흔해서 언제 나올지 예측할 수 없습니다.";
+    case "not_realty":
+      return `${who} — 부동산 경매가 아닙니다. 이 도구는 부동산만 봅니다.`;
+    case "absent":
+      return "전국 51개 법원 어디에도 이 사건번호가 없습니다. 번호를 확인해주세요 (연도·타경·일련번호).";
+    default:
+      return "조회하지 못했습니다.";
   }
-  if (d?.reason === "no_date") {
-    return `${where ? where + " " : ""}${d.caseName || "사건"} — 사건은 진행 중이지만 잡힌 매각기일이 없습니다.`
-      + (d.suspended ? ` 집행정지 상태입니다${d.suspendReason ? ` (${d.suspendReason})` : ""}.` : "")
-      + (d.appealed ? " 항고가 있습니다." : "")
-      + " 기일이 지정되면 조회됩니다.";
-  }
-  if (d?.reason === "not_realty") {
-    return `${where ? where + " " : ""}${d.caseName || "사건"} — 부동산 경매가 아닙니다.`
-      + " 이 화면은 부동산 매각물건만 조회합니다. 기일이 잡혀도 여기서는 나오지 않습니다.";
-  }
-  if (d?.reason === "absent") {
-    return "전국 어느 법원에도 이 사건번호가 없습니다. 번호를 확인해주세요 (연도·타경·일련번호).";
-  }
-  return "조회하지 못했습니다.";
 }
 
 // ── 임차인을 매물별로 가른다 ──
