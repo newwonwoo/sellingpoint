@@ -547,7 +547,23 @@ export default function App() {
     const f = (v) => `${v.slice(0, 4)}.${v.slice(4)}`;
     return { startYM: ym(s), endYM: ym(e), label: `${f(ym(s))}~${f(ym(e))}` };
   }
-  const PERIODS = [{ key: "m6", months: 6, name: "6개월" }, { key: "y1", months: 12, name: "1년" }, { key: "y3", months: 36, name: "3년" }];
+  // 짧은 기간부터. 조회·카드·용도목록이 전부 이 배열만 보고 돈다.
+  // ⚠ 3개월은 표본이 작다. 구 하나의 한 용도면 매각 10건 안팎이라 한두 건에 값이 크게 흔들린다.
+  //   그래서 카드마다 경매·매각 건수를 같이 띄운다 — 숫자만 보고 믿으면 안 되는 칸이다.
+  const PERIODS = [
+    { key: "m3", months: 3, name: "3개월" },
+    { key: "m6", months: 6, name: "6개월" },
+    { key: "y1", months: 12, name: "1년" },
+    { key: "y3", months: 36, name: "3년" },
+  ];
+  // 용도 목록은 표본이 가장 큰 구간(가장 긴 기간)에서 뽑는다. 짧은 구간엔 안 나오는 용도가 있다.
+  const longestRows = (d) => {
+    for (let i = PERIODS.length - 1; i >= 0; i--) {
+      const rows = d?.[PERIODS[i].key]?.rows;
+      if (rows?.length) return rows;
+    }
+    return [];
+  };
   // 주소→구 확정된 loc으로 6개월·1년·3년 통계 동시 조회
   async function lookupByAddress(loc) {
     setABusy(true); setAErr(""); setAData(null); setAUse(""); setAMsg("");
@@ -570,8 +586,7 @@ export default function App() {
       for (const s of settled) data[s.key] = { rows: s.rows, label: s.label };
       if (!PERIODS.some((p) => data[p.key]?.rows?.length)) throw new Error("해당 구간 통계 행이 없습니다(원본 응답 확인 필요)");
       setAData(data);
-      const longest = data.y3?.rows?.length ? data.y3.rows : data.y1?.rows?.length ? data.y1.rows : data.m6.rows;
-      const uses = useOptions(longest);
+      const uses = useOptions(longestRows(data));
       setAUse(uses.find((u) => u.includes("아파트")) || uses[0] || "");
       const nm = loc.sggName && loc.sggName !== loc.sdName ? `${loc.sdName} ${loc.sggName}` : loc.sdName;
       setAMsg(nm);
@@ -619,8 +634,7 @@ export default function App() {
   }, [aData, aUse]);
   const aUseList = useMemo(() => {
     if (!aData) return [];
-    const longest = aData.y3?.rows?.length ? aData.y3.rows : aData.y1?.rows?.length ? aData.y1.rows : aData.m6?.rows || [];
-    return useOptions(longest);
+    return useOptions(longestRows(aData));
   }, [aData]);
   // 엑셀 행: 위계 item → 라벨(소계=그룹명+소계, 전체, 세부/단일=용도명)
   const excelLabel = (it) => it.kind === "total" ? "전체" : it.kind === "subtotal" ? `${it.group} 소계` : it.leaf;
@@ -892,7 +906,10 @@ export default function App() {
           />
           <button className="go" onClick={onAddrSearch} disabled={aBusy}>{aBusy ? "조회 중…" : "낙찰가율 조회"}</button>
         </div>
-        <div className="addr-hint">도로명·지번·등기부 소재지·등기고유번호 인식 · 통계는 소속 시군구 기준 · 6개월/1년/3년 가중평균</div>
+        {/* 기간 목록은 PERIODS 에서 만든다 — 기간을 늘려놓고 안내 문구만 옛날 것으로 남기지 않으려고 */}
+        <div className="addr-hint">
+          도로명·지번·등기부 소재지·등기고유번호 인식 · 통계는 소속 시군구 기준 · {PERIODS.map((p) => p.name).join("/")} 가중평균
+        </div>
 
         {aErr && (
           <div className="addr-fallback">
