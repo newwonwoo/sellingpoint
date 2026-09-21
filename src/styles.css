@@ -187,7 +187,9 @@ tr.bad td { background: #fef4f3 !important; }
 
 /* 주소조회 3기간 카드 */
 .ar-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 14px; flex-wrap: wrap; margin-bottom: 14px; }
-.ar-cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
+/* 3개월·6개월·1년·3년 네 칸. 좁아지면 2열 → 1열로 접는다. */
+.ar-cards { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+@media (max-width: 900px) { .ar-cards { grid-template-columns: repeat(2, 1fr); } }
 .ar-card {
   border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px;
   background: #ffffff; border-top: 3px solid var(--muted);
