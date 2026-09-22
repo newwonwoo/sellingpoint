@@ -620,14 +620,15 @@ export default async function handler(req, res) {
       //   2026타경100115 ← 2024타경124852 (반포자이, 49.6억)
       //   2026타경100137 ← 2024타경2099  (종로 효제동, 10.7억)
       // ⚠ 다른 사건번호의 값이므로 반드시 출처를 밝힌다. 조용히 갖다 쓰면 숫자를 믿을 수 없게 된다.
+      // ⚠ 모사건이 둘 이상인 사건이 있다(실측: 2026타경100148 → 2026타경80 + 2026타경101220).
+      //   첫 번째만 보고 포기하면 뒤쪽에 있는 감정가를 놓친다. 걸릴 때까지 전부 시도한다.
       let parentCase = "";
       if (!lots.length && d.reason !== "closed") {
-        const mrg = (detail?.dlt_dpcnMrgTrnscsCsRlet || []).find((x) => x.userReltCsNo);
-        if (mrg) {
+        for (const mrg of (detail?.dlt_dpcnMrgTrnscsCsRlet || [])) {
+          if (!mrg.userReltCsNo) continue;
           const pNo = normalizeCaseNo(mrg.userReltCsNo) || String(mrg.userReltCsNo).trim();
-          const pDetail = await caseDetail(cookie, pNo, mrg.reltCortOfcCd || d.courtCode);
-          const pLots = lotsFromCase(pDetail);
-          if (pLots.length) { lots = pLots; parentCase = pNo; }
+          const pLots = lotsFromCase(await caseDetail(cookie, pNo, mrg.reltCortOfcCd || d.courtCode));
+          if (pLots.length) { lots = pLots; parentCase = pNo; break; }
         }
       }
 
