@@ -11,6 +11,7 @@ import {
   scopeTenants, TAX_PARTY, VERDICT_LABEL, ymdLabel,
 } from "./caseModel.js";
 import { buildResultBook, buildTemplateBook, caseRows, failRow, MAX_CASES, OUT_COLS, readCaseInputs, saveBook } from "./caseSheet.js";
+import { AppraisalTip } from "./InfoTip.jsx";
 
 const YEARS = Array.from({ length: 12 }, (_, i) => 2026 - i);
 const MONTHS = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0"));
@@ -969,7 +970,10 @@ export default function App() {
           />
           <button className="go" onClick={runCaseLookup} disabled={cBusy}>{cBusy ? "조회 중…" : "실익 조회"}</button>
         </div>
-        <div className="addr-hint">감정평가액 · 청구금액 · 최선순위 설정일자 · 인수권리를 법원 매각물건명세서에서 가져옵니다</div>
+        <div className="addr-hint">
+          감정평가액 · 청구금액 · 최선순위 설정일자 · 인수권리를 법원 매각물건명세서에서 가져옵니다
+          <AppraisalTip />
+        </div>
 
         {cErr && (
           <div className={`status ${NO_PRICE_REASONS.has(cReason) ? "warn" : "err"}`}>
@@ -1364,6 +1368,7 @@ export default function App() {
 
         <div className="bx-hint">
           사건번호만 있으면 됩니다. <b>우리채권액 · 선순위채권 · 집행비용</b> 칼럼이 같이 있으면 실익까지 판정해 채웁니다.
+          <AppraisalTip />
           <button className="bx-link" onClick={() => saveBook(buildTemplateBook(), "실익분석_업로드양식.xlsx")}>업로드 양식 받기</button>
         </div>
 
