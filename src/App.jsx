@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import CourtSearchTab from "./CourtSearchTab.jsx";
 import * as XLSX from "xlsx-js-style";
 import JSZip from "jszip";
 import regions from "./regions.json";
@@ -158,12 +159,14 @@ const TABS = [
   { key: "stats", label: "낙찰가율 조회" },
   { key: "case", label: "사건번호 실익" },
   { key: "batch", label: "엑셀 일괄분석" },
+  { key: "court-search", label: "사건검색 조회" },
   { key: "tools", label: "역추적(진단)" },
 ];
 const TAB_SUB = {
   stats: "소재지·기간을 고르면 법원 매각통계의 용도별 매각가율(=낙찰가율)을 가져옵니다.",
   case: "사건번호를 넣으면 그 재산의 감정평가액·최선순위·인수권리를 법원에서 가져와 실익을 판정합니다.",
   batch: "사건번호가 적힌 엑셀을 올리면 사건마다 조회해 매물별로 정리한 엑셀을 내려드립니다.",
+  "court-search": "법원·사건번호 목록을 올리면 대법원 나의사건검색에서 진행내용을 자동 조회해 엑셀로 내려드립니다.",
   tools: "기간·산식이 안 밝혀진 평균 낙찰가율 값이 어느 구간에서 나오는지 거꾸로 찾습니다.",
 };
 const initialTab = () => {
@@ -1524,6 +1527,10 @@ export default function App() {
       )}
 
       </>)}
+
+      {tab === "court-search" && (
+        <CourtSearchTab />
+      )}
 
       {tab === "tools" && (<>
       <div className="section-div">낙찰가율 역추적 (기간·산식 거꾸로 찾기)</div>
