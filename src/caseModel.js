@@ -85,10 +85,14 @@ export const NOT_FOUND_LABEL = {
   no_appraisal: "감정가 미공개",
   not_realty: "부동산 사건 아님",
   absent: "사건번호 확인 필요",
+  eviction: "인도명령 사건",
   error: "조회 실패",
 };
 // 감정가가 없는 유형인가 (사건은 실재하지만 값을 못 가져오는 경우)
 export const NO_PRICE_REASONS = new Set(["closed", "suspended", "appealed", "no_appraisal", "not_realty"]);
+// 빨간 '오류'로 띄우면 안 되는 사유들. 사건은 멀쩡하고 담당자가 할 일만 다르다.
+// (인도명령은 감정가 유형이 아니라 애초에 사건 종류가 다른 것이라 따로 더한다)
+export const WARN_REASONS = new Set([...NO_PRICE_REASONS, "eviction"]);
 export function notFoundText(d) {
   // "서울중앙지방법원 경매7계 부동산강제경매" — 어느 사건 얘기인지 먼저 못박는다
   const who = [d?.court, d?.dept, d?.caseName].filter(Boolean).join(" ") || "이 사건";
@@ -107,12 +111,38 @@ export function notFoundText(d) {
         + " 사유는 법원이 공개하지 않습니다. 개시 8~9개월이 지난 사건에도 흔해서 언제 나올지 예측할 수 없습니다.";
     case "not_realty":
       return `${who} — 부동산 경매가 아닙니다. 이 도구는 부동산만 봅니다.`;
+    case "eviction":
+      return "부동산인도명령(타인) 사건입니다. 경매사건이 아니라 경매사건이 이 사건의 선행사건이라,"
+        + " 경매정보에서는 조회되지 않습니다. 선행 경매사건번호(○○○○타경○○○○)를 넣으면"
+        + " 그 사건에 붙은 인도명령 번호까지 같이 나옵니다."
+        + " 당사자·결정일·집행 상태는 대법원 '나의 사건검색'에서 확인하세요.";
     case "absent":
       return "전국 51개 법원 어디에도 이 사건번호가 없습니다. 번호를 확인해주세요 (연도·타경·일련번호).";
     default:
       return "조회하지 못했습니다.";
   }
 }
+
+// ── 관련사건 · 인도명령 ────────────────────────────────────────
+// 응답에서 관련사건이 두 자리에 올 수 있다. 찾은 사건은 caseInfo 안,
+// 못 찾은 사건(종결 등)은 최상위다. 읽는 쪽이 매번 두 군데를 보면 한쪽을 빠뜨린다.
+export function relatedOf(data) {
+  return data?.caseInfo?.relatedCases || data?.relatedCases || [];
+}
+
+// 부동산인도명령(타경이 아니라 '타인' 사건). 낙찰자가 점유자를 내보내는 절차라
+// 채권관리에서는 '인도 단계로 넘어갔다'는 신호다.
+//
+// ⚠ 여기서 나오는 건 사건번호와 법원뿐이다. 내용(당사자·결정일·송달·집행)은 못 가져온다.
+//   경매정보 API 는 경매사건(타경)만 서비스한다 — 실측: 2026타인3944 를 전국 51개 법원에
+//   물어도 0건이고, 같은 실행의 타경 대조군은 정상이었다. 2024타인2(실재하는 인도명령)도
+//   사용자표기·내부표기 둘 다 빈 응답이다. 내용은 대법원 '나의 사건검색'에만 있고
+//   거기는 당사자명 + 자동입력방지 문자가 필요해 자동 수집 대상이 아니다.
+//   그러니 화면·엑셀에서 '접수됐다'까지만 말하고 더 아는 척하지 않는다.
+export function evictionsOf(data) {
+  return relatedOf(data).filter((r) => r.eviction);
+}
+export const EVICTION_NOTE = "사건번호까지만 조회됩니다. 당사자·결정일·집행 상태는 대법원 '나의 사건검색'에서 확인하세요.";
 
 // ── 감정가가 나오는 요건 (화면 안내창) ──────────────────────────
 // 화면 툴팁이 여기서 글을 가져간다. 안내문을 JSX 안에 직접 쓰면 판정 로직이 바뀔 때

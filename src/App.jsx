@@ -7,11 +7,12 @@ import { courtSggCodes, dedupeSggOptions } from "./courtCodes";
 import { groupRows, matchUsageRow } from "./statsModel.js";
 import { bucketMonth, categoriesOf, findWindows, monthRange, referenceGrid, shiftYM } from "./backtrack.js";
 import {
-  benefitOf, extractAmounts, monthsBetween, NO_PRICE_REASONS, NOT_FOUND_LABEL, notFoundText, num, opposability,
-  scopeTenants, TAX_PARTY, VERDICT_LABEL, ymdLabel,
+  benefitOf, evictionsOf, EVICTION_NOTE, extractAmounts, monthsBetween, NO_PRICE_REASONS, NOT_FOUND_LABEL,
+  notFoundText, num, opposability, relatedOf, scopeTenants, TAX_PARTY, VERDICT_LABEL, WARN_REASONS, ymdLabel,
 } from "./caseModel.js";
 import { buildResultBook, buildTemplateBook, caseRows, failRow, MAX_CASES, OUT_COLS, readCaseInputs, saveBook } from "./caseSheet.js";
 import { AppraisalTip } from "./InfoTip.jsx";
+import { evictionCaseNo } from "./caseNo.js";
 
 const YEARS = Array.from({ length: 12 }, (_, i) => 2026 - i);
 const MONTHS = Array.from({ length: 12 }, (_, i) => String(i + 1).padStart(2, "0"));
@@ -344,6 +345,8 @@ export default function App() {
   const [cErr, setCErr] = useState("");
   // 조회 안 된 사유. 종결 사건은 오류가 아니라 정보라서 빨강으로 띄우면 안 된다.
   const [cReason, setCReason] = useState("");
+  // 조회 실패 응답 원본. 종결 사건이라도 인도명령·관련사건은 여기에 실려 온다.
+  const [cStatus, setCStatus] = useState(null);
   const [cData, setCData] = useState(null);
   // 매물별 실익 입력 { [lotNo]: {claim, senior, assumed, cost} }
   const [cCalc, setCCalc] = useState({});
@@ -727,7 +730,11 @@ export default function App() {
   async function runCaseLookup() {
     const no = caseNo.trim();
     if (!no) { setCErr("사건번호를 입력하세요 (예: 2024타경115858)"); return; }
-    setCBusy(true); setCErr(""); setCReason(""); setCData(null); setCCalc({});
+    // 인도명령(타인)은 경매사건이 아니라 경매사건이 그 선행사건이다. 조회가 될 리 없으니
+    // 법원을 부르지 않고 바로 안내한다.
+    const ev = evictionCaseNo(no);
+    if (ev) { setCErr(notFoundText({ reason: "eviction" })); setCReason("eviction"); setCStatus(null); setCData(null); return; }
+    setCBusy(true); setCErr(""); setCReason(""); setCStatus(null); setCData(null); setCCalc({});
     try {
       const { startYM, endYM } = ratePeriod();
       const data = await fetchCaseAnalyzed(no, startYM, endYM, new Map());
@@ -739,7 +746,7 @@ export default function App() {
       }
       setCCalc(prefill);
       setCData({ ...data, period: `${ymLabel(startYM)}~${ymLabel(endYM)}` });
-    } catch (e) { setCErr(String(e.message || e)); setCReason(e.reason || "error"); }
+    } catch (e) { setCErr(String(e.message || e)); setCReason(e.reason || "error"); setCStatus(e.caseStatus || null); }
     finally { setCBusy(false); }
   }
 
@@ -781,6 +788,14 @@ export default function App() {
         while (next < items.length && !cancel.stop) {
           const i = next++;
           const it = items[i];
+          // 인도명령(타인)은 경매사건이 아니라 경매사건이 그 선행사건이다. 법원에 물어볼 것도
+          // 없이 안 나오므로 호출을 아끼고 바로 안내 줄을 남긴다(실패로도 세지 않는다).
+          if (it.eviction) {
+            chunks[i] = [failRow(it.caseNo, it, notFoundText({ reason: "eviction" }), "eviction")];
+            done++;
+            setBProg({ done, total: items.length, fail });
+            continue;
+          }
           try {
             const data = await fetchCaseAnalyzed(it.caseNo, startYM, endYM, rateCache);
             chunks[i] = caseRows(data, it);     // 여기서 응답을 행으로 접고
@@ -976,12 +991,20 @@ export default function App() {
         </div>
 
         {cErr && (
-          <div className={`status ${NO_PRICE_REASONS.has(cReason) ? "warn" : "err"}`}>
+          <div className={`status ${WARN_REASONS.has(cReason) ? "warn" : "err"}`}>
             <b>{NOT_FOUND_LABEL[cReason] || "조회 실패"}</b> — {cErr}
             {NO_PRICE_REASONS.has(cReason) && (
               <div className="nf-note">
                 매각물건 검색은 <b>지금 매각이 진행 중인 물건 목록</b>이라 사건이 있어도 여기 안 나옵니다.
                 사건 자체는 법원에 있습니다.
+              </div>
+            )}
+            {/* 인도명령은 매각대금 납부 뒤에 붙으므로 '종결'로 분류된 사건에서 나온다.
+                여기서 안 보여주면 정작 인도 단계로 넘어간 사건만 빈 화면이 된다. */}
+            {evictionsOf(cStatus).length > 0 && (
+              <div className="nf-evict">
+                <b>부동산인도명령 {evictionsOf(cStatus).map((r) => r.caseNo).join(" · ")}</b>
+                <span>{EVICTION_NOTE}</span>
               </div>
             )}
           </div>
@@ -1079,9 +1102,16 @@ export default function App() {
                     — 금액은 법원이 공개하지 않으니 배당요구 내역을 따로 확인하세요.
                   </div>
                 )}
-                {cData.caseInfo.relatedCases.length > 0 && (
+                {evictionsOf(cData).length > 0 && (
+                  <div className="pt-evict">
+                    <b>부동산인도명령 {evictionsOf(cData).map((r) => r.caseNo).join(" · ")}</b>
+                    <span>{EVICTION_NOTE}</span>
+                  </div>
+                )}
+                {relatedOf(cData).filter((r) => !r.eviction).length > 0 && (
                   <div className="pt-rel">
-                    관련사건 {cData.caseInfo.relatedCases.map((r) => `${r.court} ${r.caseNo}${r.kind ? ` (${r.kind})` : ""}`).join(" · ")}
+                    관련사건 {relatedOf(cData).filter((r) => !r.eviction)
+                      .map((r) => `${r.court} ${r.caseNo}${r.kind ? ` (${r.kind})` : ""}`).join(" · ")}
                   </div>
                 )}
                 {cData.caseInfo.relatedCases.some((r) => r.insolvency) && (

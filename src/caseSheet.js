@@ -12,8 +12,8 @@
 //      36×N번 복제하지만 배열은 값만 담는다. 셀 스타일도 미리 만들어 참조만 공유한다.
 
 import * as XLSX from "xlsx-js-style";
-import { caseNoFromCell } from "./caseNo.js";
-import { benefitOf, extractAmounts, monthsBetween, NOT_FOUND_LABEL, opposability, scopeTenants, TAX_PARTY, VERDICT_LABEL, ymdLabel, num } from "./caseModel.js";
+import { caseNoFromCell, evictionCaseNo } from "./caseNo.js";
+import { benefitOf, evictionsOf, extractAmounts, monthsBetween, NOT_FOUND_LABEL, opposability, relatedOf, scopeTenants, TAX_PARTY, VERDICT_LABEL, ymdLabel, num } from "./caseModel.js";
 
 // 한 번에 받을 사건 수 상한. 법원 서버에 대한 예의이기도 하고,
 // 이걸 넘기면 한 탭에서 도는 시간이 실무 인내심을 넘는다(건당 3~8초).
@@ -102,8 +102,15 @@ export function readCaseInputs(buf) {
 
   if (headRow >= 0) {
     for (let r = headRow + 1; r <= lastRow; r++) {
-      const caseNo = caseNoFromCell(cellText(ws, r, cols.caseNo));
-      if (!caseNo) continue;
+      const raw = cellText(ws, r, cols.caseNo);
+      const caseNo = caseNoFromCell(raw);
+      // 인도명령(타인)이 섞여 있으면 버리지 않고 표시만 해서 넘긴다. 조회는 안 되지만
+      // 결과에 한 줄은 남아야 올린 건수와 대사가 된다.
+      if (!caseNo) {
+        const ev = evictionCaseNo(raw);
+        if (ev) push(ev, { ref: cols.ref != null ? cellText(ws, r, cols.ref) : "", eviction: true });
+        continue;
+      }
       push(caseNo, {
         ref: cols.ref != null ? cellText(ws, r, cols.ref) : "",
         claim: cols.claim != null ? cellMoney(ws, r, cols.claim) : null,
@@ -176,9 +183,22 @@ export const OUT_COLS = [
   { label: "명세서", w: 10 },
   { label: "인수권리 내용", w: 40 },
   { label: "법정지상권", w: 20 },
+  // 인도명령(타인) — 낙찰 뒤 점유자를 내보내는 절차. 접수 여부와 사건번호까지만 나온다.
+  // 내용은 경매정보에 없다(caseModel.EVICTION_NOTE 참고).
+  { label: "인도명령", w: 16 },
+  { label: "관련사건", w: 30 },
   { label: "특이사항", w: 46 },
 ];
 const VERDICT_COL = OUT_COLS.findIndex((c) => c.label === "실익판정");
+const EVICT_COL = OUT_COLS.findIndex((c) => c.label === "인도명령");
+const RELT_COL = OUT_COLS.findIndex((c) => c.label === "관련사건");
+
+// 관련사건 → 셀 두 칸. 인도명령은 따로 떼고, 나머지는 종류를 붙여 한 칸에 넣는다.
+const relatedCells = (data) => [
+  evictionsOf(data).map((r) => r.caseNo).join(" · "),
+  relatedOf(data).filter((r) => !r.eviction)
+    .map((r) => `${r.caseNo}${r.kind ? `(${r.kind})` : ""}`).join(" · "),
+];
 
 // 한 사건 응답 → 매물별 행 배열. 응답 원본은 호출부에서 바로 버린다.
 // input: 업로드 시트에서 온 { ref, claim, senior, assumed, cost }
@@ -270,6 +290,7 @@ export function caseRows(data, input) {
       lot.detailReady === false ? "미공개" : lot.seniorDate ? "공개" : "",
       lot.assumedRights || "",
       lot.surfaceRight || "",
+      ...relatedCells(data),
       flags.join(" / "),
     ];
   });
@@ -287,6 +308,9 @@ export function failRow(caseNo, input, message, reason, status) {
   row[15] = input?.senior ?? null;
   row[17] = input?.cost ?? null;
   if (status?.claimAmount) row[24] = status.claimAmount;
+  // 종결 사건이라 실익은 못 내도 인도명령은 여기서만 나온다 — 인도명령은 매각대금 납부
+  // 뒤에 붙으므로 '종결'로 분류된 행이 오히려 알짜다. 빈 줄로 두면 안 된다.
+  [row[EVICT_COL], row[RELT_COL]] = relatedCells(status);
   row[VERDICT_COL] = NOT_FOUND_LABEL[reason] || NOT_FOUND_LABEL.error;
   row[OUT_COLS.length - 1] = message || "";
   return row;

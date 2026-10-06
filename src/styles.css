@@ -427,3 +427,12 @@ tr.bad td { background: #fef4f3 !important; }
 @media (max-width: 560px) {
   .itip-pop { position: fixed; left: 12px; right: 12px; bottom: 12px; top: auto; width: auto; max-width: none; }
 }
+
+/* 인도명령 — 낙찰 뒤 인도 단계로 넘어갔다는 신호라 관련사건 줄에 묻히면 안 된다. */
+.pt-evict, .nf-evict {
+  margin-top: 8px; padding: 8px 11px; border-radius: 8px;
+  background: var(--teal-soft); border-left: 3px solid var(--teal);
+  font-size: 12.5px; line-height: 1.5;
+}
+.pt-evict b, .nf-evict b { display: block; color: var(--teal); font-family: var(--mono); }
+.pt-evict span, .nf-evict span { display: block; margin-top: 2px; color: var(--muted); font-size: 12px; }

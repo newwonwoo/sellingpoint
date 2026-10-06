@@ -292,6 +292,26 @@ async function fetchSurvey(cookie, csNo, courtCode) {
 //   rletApalYn "Y"      : 항고됨 (매각 지연)
 //   auctnSuspStatCd     : 경매정지상태코드. 01·02 만 '집행정지'다(화면 로직 확인).
 const SUSPENDED = new Set(["01", "02"]);
+
+// 관련사건 목록을 한 모양으로 만든다. 찾은 사건(fetchParties)과 못 찾은 사건(diagnose)이
+// 같은 데이터를 쓰므로 매핑을 한 군데에 둔다.
+//
+// ⚠ 인도명령(타인) 사건은 '여기 이름만' 나온다. 그 사건번호로 내용을 조회하는 API 는 없다 —
+//   경매정보는 경매사건(타경)만 서비스한다. 실측: 2024타인2 를 사건내역에 넣으면 빈 응답이다
+//   (사용자표기·내부표기 둘 다). 당사자·결정일·송달·집행 상태는 대법원 '나의 사건검색'에만
+//   있고 거기는 당사자명과 자동입력방지 문자가 필요하다. 그래서 '접수됐는지와 사건번호'까지만
+//   약속한다. 더 가져올 수 있는 척하면 안 된다.
+function mapRelatedCases(rows) {
+  return (rows || []).map((x) => ({
+    court: x.cortOfcNm || "",
+    caseNo: x.userReltCsNo || "",
+    kind: x.reltCsDvsNm || "",
+    // 낙찰자가 점유자를 내보내는 절차. 채권관리에서는 '인도 단계로 넘어갔다'는 신호다.
+    eviction: (x.reltCsDvsNm || "") === "인도명령",
+    // 회생·파산이면 절차가 멈출 수 있어 따로 표시한다
+    insolvency: /회생|파산/.test(`${x.cortOfcNm || ""}${x.userReltCsNo || ""}`),
+  }));
+}
 async function fetchParties(cookie, csNo, courtCode) {
   try {
     const r = await fetch(BASE + PARTY_PATH, {
@@ -336,13 +356,7 @@ async function fetchParties(cookie, csNo, courtCode) {
       applicantNameInTenants,
       parties: [...groups.entries()].map(([type, names]) => ({ type, count: names.length, names })),
       partyCount: (d.dlt_rletCsIntrpsLst || []).length,
-      relatedCases: (d.dlt_rletReltCsLst || []).map((x) => ({
-        court: x.cortOfcNm || "",
-        caseNo: x.userReltCsNo || "",
-        kind: x.reltCsDvsNm || "",
-        // 회생·파산이면 절차가 멈출 수 있어 따로 표시한다
-        insolvency: /회생|파산/.test(`${x.cortOfcNm || ""}${x.userReltCsNo || ""}`),
-      })),
+      relatedCases: mapRelatedCases(d.dlt_rletReltCsLst),
       appealed: b.rletApalYn === "Y",
       suspended: SUSPENDED.has(String(b.auctnSuspStatCd || "")),
       suspendReason: b.csProgSuspRsn || "",
@@ -505,6 +519,10 @@ async function diagnose(cookie, csNo, courtCode) {
     appealed: b.rletApalYn === "Y",
     suspended: SUSPENDED.has(String(b.auctnSuspStatCd || "")),
     suspendReason: b.csProgSuspRsn || "",
+    // 종결 사건에도 관련사건은 온다. 인도명령은 매각대금 납부 뒤에 붙으므로
+    // 오히려 '종결'로 분류되는 사건에서 나온다(표본: 종결 22건 중 2건).
+    // 여기서 안 실어 보내면 정작 인도 단계로 넘어간 사건만 화면이 비어버린다.
+    relatedCases: mapRelatedCases(d.dlt_rletReltCsLst),
   };
 }
 
