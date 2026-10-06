@@ -8,7 +8,7 @@ on:
         required: false
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   search:
@@ -44,32 +44,25 @@ jobs:
       - name: 사건검색 실행
         run: |
           cd court-search
-          python court_search.py input.xlsx output.xlsx
+          python search.py input.xlsx output.xlsx
 
-      - name: 결과 파일 커밋
+      - name: 결과 파일 생성 확인
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          DATE=$(TZ='Asia/Seoul' date '+%Y%m%d_%H%M%S')
-          cp court-search/output.xlsx "court-search/results/result_${DATE}.xlsx"
-          git add "court-search/results/"
-          if ! git diff --staged --quiet; then
-            git commit -m "자동조회 결과: ${DATE}"
-            git push
-          else
-            echo "변경사항 없음 — 커밋 생략"
-          fi
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          python - <<'PY'
+          import openpyxl
+          from pathlib import Path
+          path = Path("court-search/output.xlsx")
+          if not path.exists():
+              raise SystemExit("❌ output.xlsx 없음")
+          wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+          print(f"✅ 결과 파일 생성: {wb.active.max_row - 1}건")
+          PY
 
       - name: 완료 요약
         if: always()
         run: |
-          echo "=== 실행 결과 ==="
           if [ -f "court-search/output.xlsx" ]; then
             ls -lh court-search/output.xlsx
           else
             echo "output.xlsx 없음"
           fi
-          echo "=== 최근 결과 파일 ==="
-          ls -lht court-search/results/ 2>/dev/null | head -6 || echo "results/ 없음"
