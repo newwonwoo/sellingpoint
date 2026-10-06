@@ -21,60 +21,53 @@ jobs:
         with:
           fetch-depth: 1
 
-      - name: Python 설치
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-          cache: 'pip'
-          cache-dependency-path: court-search/requirements.txt
-
       - name: 의존성 설치
         run: |
           pip install -r court-search/requirements.txt
           playwright install chromium
-          playwright install-deps chromium
+        shell: pwsh
 
       - name: input.xlsx 확인
         run: |
-          if [ ! -f court-search/input.xlsx ]; then
-            echo "❌ court-search/input.xlsx 없음"
+          if (-Not (Test-Path "court-search/input.xlsx")) {
+            Write-Host "❌ court-search/input.xlsx 없음"
             exit 1
-          fi
-          echo "✅ input.xlsx 확인"
-          ls -lh court-search/
-
-      - name: 캡차 모델 확인
-        run: |
-          if [ -f court-search/captcha_model.pkl ]; then
-            echo "✅ 캡차 모델 있음"
-          else
-            echo "⚠ 캡차 모델 없음 → 수동 입력 불가, 재시도 20회 후 조회실패 기록"
-          fi
+          }
+          Write-Host "✅ input.xlsx 확인"
+        shell: pwsh
 
       - name: 사건검색 실행
         run: |
           cd court-search
           python court_search.py input.xlsx output.xlsx
-        env:
-          DISPLAY: ':99'
+        shell: pwsh
 
       - name: 결과 파일 커밋
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          DATE=$(date '+%Y%m%d_%H%M%S' -d '+9 hours')
-          cp court-search/output.xlsx "court-search/results/result_${DATE}.xlsx"
-
-          git add court-search/results/
-          git diff --staged --quiet || git commit -m "자동조회 결과: ${DATE}"
+          $DATE = (Get-Date).ToUniversalTime().AddHours(9).ToString("yyyyMMdd_HHmmss")
+          Copy-Item "court-search/output.xlsx" "court-search/results/result_$DATE.xlsx"
+          git add "court-search/results/"
+          $diff = git diff --staged --quiet
+          if ($LASTEXITCODE -ne 0) {
+            git commit -m "자동조회 결과: $DATE"
+          }
           git push
+        shell: pwsh
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 완료 요약
         if: always()
         run: |
-          echo "=== 실행 결과 ==="
-          ls -lh court-search/output.xlsx 2>/dev/null || echo "output.xlsx 없음"
-          ls -lh court-search/results/ 2>/dev/null | tail -5
+          Write-Host "=== 실행 결과 ==="
+          if (Test-Path "court-search/output.xlsx") {
+            Get-Item "court-search/output.xlsx" | Select-Object Name, Length, LastWriteTime
+          } else {
+            Write-Host "output.xlsx 없음"
+          }
+          if (Test-Path "court-search/results/") {
+            Get-ChildItem "court-search/results/" | Select-Object -Last 5 | Select-Object Name, Length
+          }
+        shell: pwsh
