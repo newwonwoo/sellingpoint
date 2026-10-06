@@ -19,7 +19,7 @@ from playwright.async_api import async_playwright, Page, TimeoutError as Playwri
 
 # 캡차 솔버 임포트
 sys.path.insert(0, os.path.dirname(__file__))
-from captcha_solver import predict_captcha, MODEL_PATH
+from captcha_solver import predict_captcha
 
 # ──────────────────────────────────────────────
 # 설정
@@ -117,10 +117,6 @@ def parse_case_no(case_no: str):
 # ──────────────────────────────────────────────
 async def get_captcha_answer(page: Page) -> str | None:
     """캡차 이미지를 가져와 ML로 예측"""
-    if not os.path.exists(MODEL_PATH):
-        print("  ⚠ 캡차 모델 없음 → 수동 입력 모드 (콘솔에 6자리 입력)")
-        return None
-
     # 캡차 이미지 URL에서 바이트 가져오기
     captcha_img = page.locator('#captcha img')
     src = await captcha_img.get_attribute('src')
@@ -395,10 +391,6 @@ async def main():
 
     cases = read_input(input_path)
     print(f"총 {len(cases)}건 조회 시작\n")
-
-    if not os.path.exists(MODEL_PATH):
-        print("⚠ 캡차 모델(captcha_model.pkl)이 없습니다.")
-        print("  → 수동 입력 모드로 실행하거나, 먼저 captcha_solver.py의 train_model()로 학습하세요.\n")
 
     results = []
     async with async_playwright() as p:
