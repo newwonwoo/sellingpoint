@@ -7,6 +7,9 @@ on:
         description: 'input.xlsx SHA (업로드 후 자동 입력)'
         required: false
 
+permissions:
+  contents: write
+
 jobs:
   search:
     runs-on: ubuntu-latest
