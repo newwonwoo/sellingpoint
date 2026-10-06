@@ -1,5 +1,5 @@
 playwright==1.49.0
 openpyxl==3.1.5
 Pillow==11.0.0
-scikit-learn==1.5.2
+easyocr==1.7.2
 numpy==2.1.3
