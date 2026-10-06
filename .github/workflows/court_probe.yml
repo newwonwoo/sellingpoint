@@ -1,0 +1,30 @@
+name: 대법원 신규 사이트 진단 (임시)
+
+# 신규 나의사건검색(ssgo.scourt.go.kr)의 접속 가능 여부와 화면 구조를 로그로 남긴다.
+# 저장소에 아무것도 커밋하지 않고, 사용자 데이터도 쓰지 않는다. 확인 후 삭제.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Playwright 설치
+        run: |
+          pip install playwright==1.49.0
+          playwright install --with-deps chromium
+
+      - name: 신규 사이트 진단
+        run: python court-search/probe_ssgo.py
