@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   search:
-    runs-on: self-hosted
+    runs-on: ubuntu-latest
     timeout-minutes: 30
 
     steps:
@@ -21,53 +21,55 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: court-search/requirements.txt
+
       - name: 의존성 설치
         run: |
-          pip install -r court-search/requirements.txt
-          playwright install chromium
-        shell: pwsh
+          pip install --break-system-packages -r court-search/requirements.txt
+          playwright install chromium --with-deps
 
       - name: input.xlsx 확인
         run: |
-          if (-Not (Test-Path "court-search/input.xlsx")) {
-            Write-Host "❌ court-search/input.xlsx 없음"
+          if [ ! -f "court-search/input.xlsx" ]; then
+            echo "❌ court-search/input.xlsx 없음"
             exit 1
-          }
-          Write-Host "✅ input.xlsx 확인"
-        shell: pwsh
+          fi
+          echo "✅ input.xlsx 확인"
 
       - name: 사건검색 실행
         run: |
           cd court-search
           python court_search.py input.xlsx output.xlsx
-        shell: pwsh
 
       - name: 결과 파일 커밋
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          $DATE = (Get-Date).ToUniversalTime().AddHours(9).ToString("yyyyMMdd_HHmmss")
-          Copy-Item "court-search/output.xlsx" "court-search/results/result_$DATE.xlsx"
+          DATE=$(TZ='Asia/Seoul' date '+%Y%m%d_%H%M%S')
+          cp court-search/output.xlsx "court-search/results/result_${DATE}.xlsx"
           git add "court-search/results/"
-          $diff = git diff --staged --quiet
-          if ($LASTEXITCODE -ne 0) {
-            git commit -m "자동조회 결과: $DATE"
-          }
-          git push
-        shell: pwsh
+          if ! git diff --staged --quiet; then
+            git commit -m "자동조회 결과: ${DATE}"
+            git push
+          else
+            echo "변경사항 없음 — 커밋 생략"
+          fi
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: 완료 요약
         if: always()
         run: |
-          Write-Host "=== 실행 결과 ==="
-          if (Test-Path "court-search/output.xlsx") {
-            Get-Item "court-search/output.xlsx" | Select-Object Name, Length, LastWriteTime
-          } else {
-            Write-Host "output.xlsx 없음"
-          }
-          if (Test-Path "court-search/results/") {
-            Get-ChildItem "court-search/results/" | Select-Object -Last 5 | Select-Object Name, Length
-          }
-        shell: pwsh
+          echo "=== 실행 결과 ==="
+          if [ -f "court-search/output.xlsx" ]; then
+            ls -lh court-search/output.xlsx
+          else
+            echo "output.xlsx 없음"
+          fi
+          echo "=== 최근 결과 파일 ==="
+          ls -lht court-search/results/ 2>/dev/null | head -6 || echo "results/ 없음"

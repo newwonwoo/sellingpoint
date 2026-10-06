@@ -1,15 +1,15 @@
 """
 대법원 나의사건검색 자동조회 스크립트
+- 대상: https://ssgo.scourt.go.kr/ssgo/index.on?cortId=www (신규 WebSquare 기반)
 - input.xlsx: 법원, 사건번호 → output.xlsx: 22개 칼럼 결과
-- 하루 1회 배치 실행 용도
-- 캡차 실패시 최대 20회 재시도
+- 캡차: blob URL → 요소 screenshot → EasyOCR (숫자 6자리)
+- 최대 20회 캡차 재시도
 """
 
 import asyncio
 import sys
 import os
 import io
-import time
 import re
 from datetime import datetime
 
@@ -17,16 +17,15 @@ import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeout
 
-# 캡차 솔버 임포트
 sys.path.insert(0, os.path.dirname(__file__))
 from captcha_solver import predict_captcha
 
 # ──────────────────────────────────────────────
 # 설정
 # ──────────────────────────────────────────────
-TARGET_URL = 'https://safind.scourt.go.kr/sf/mysafind.jsp'
+TARGET_URL = 'https://ssgo.scourt.go.kr/ssgo/index.on?cortId=www'
 MAX_CAPTCHA_RETRY = 20
-HEADLESS = True          # False 로 바꾸면 브라우저 화면 보임
+HEADLESS = True
 
 INPUT_FILE  = 'input.xlsx'
 OUTPUT_FILE = 'output.xlsx'
@@ -41,51 +40,75 @@ OUTPUT_HEADERS = [
     '신청인', '피신청인', '조회일시',
 ]
 
-# 법원명 → select value 매핑 (대법원 홈 기준)
+# ── 신규 사이트 법원코드 매핑 ──────────────────
+# select#mf_ssgoTopMainTab_contents_content1_body_sbx_cortCd 의 option value
 COURT_NAME_MAP = {
-    '서울중앙지방법원': '101010',
-    '서울동부지방법원': '101020',
-    '서울남부지방법원': '101030',
-    '서울북부지방법원': '101040',
-    '서울서부지방법원': '101050',
-    '서울가정법원':     '101060',
-    '서울행정법원':     '101070',
-    '서울회생법원':     '101080',
-    '의정부지방법원':   '102010',
-    '인천지방법원':     '102020',
-    '인천가정법원':     '102030',
-    '수원지방법원':     '102040',
-    '수원가정법원':     '102050',
-    '수원회생법원':     '102060',
-    '춘천지방법원':     '103010',
-    '대전지방법원':     '104010',
-    '대전가정법원':     '104020',
-    '대전회생법원':     '104030',
-    '청주지방법원':     '104040',
-    '대구지방법원':     '105010',
-    '대구가정법원':     '105020',
-    '대구회생법원':     '105030',
-    '부산지방법원':     '106010',
-    '부산가정법원':     '106020',
-    '부산회생법원':     '106030',
-    '울산지방법원':     '106040',
-    '울산가정법원':     '106050',
-    '창원지방법원':     '106060',
-    '광주지방법원':     '107010',
-    '광주가정법원':     '107020',
-    '광주회생법원':     '107030',
-    '전주지방법원':     '107040',
-    '제주지방법원':     '108010',
+    '대법원':           '100000',
+    '서울고등법원':     '200000',
+    '서울중앙지방법원': '201000',
+    '서울동부지방법원': '201010',
+    '서울남부지방법원': '201020',
+    '서울북부지방법원': '201030',
+    '서울서부지방법원': '201040',
+    '서울가정법원':     '201050',
+    '서울행정법원':     '201060',
+    '서울회생법원':     '201070',
+    '의정부지방법원':   '202000',
+    '인천지방법원':     '203000',
+    '인천가정법원':     '203010',
+    '수원지방법원':     '204000',
+    '수원가정법원':     '204010',
+    '수원회생법원':     '204020',
+    '수원고등법원':     '204500',
+    '춘천지방법원':     '205000',
+    '부산고등법원':     '300000',
+    '부산지방법원':     '301000',
+    '부산가정법원':     '301010',
+    '부산회생법원':     '301020',
+    '울산지방법원':     '302000',
+    '울산가정법원':     '302010',
+    '창원지방법원':     '303000',
+    '대구고등법원':     '400000',
+    '대구지방법원':     '401000',
+    '대구가정법원':     '401010',
+    '대구회생법원':     '401020',
+    '광주고등법원':     '500000',
+    '광주지방법원':     '501000',
+    '광주가정법원':     '501010',
+    '광주회생법원':     '501020',
+    '전주지방법원':     '502000',
+    '대전고등법원':     '600000',
+    '대전지방법원':     '601000',
+    '대전가정법원':     '601010',
+    '대전회생법원':     '601020',
+    '청주지방법원':     '602000',
+    '제주지방법원':     '700000',
 }
 
-# 사건구분 한글 → value
+# ── 신규 사이트 사건구분 매핑 ──────────────────
+# select#mf_ssgoTopMainTab_contents_content1_body_sbx_csDvsCd 의 option value
+# (실제 option 값은 사이트마다 다를 수 있음 — 숫자 대신 한글 코드)
 CASE_TYPE_MAP = {
-    '가': '1', '나': '2', '다': '3', '라': '4', '마': '5',
-    '바': '6', '사': '7', '아': '8', '자': '9', '차': '10',
-    '카': '11', '타': '12', '파': '13', '하': '14',
-    '가단': '15', '가합': '16', '나': '17', '노': '18',
-    '고': '19', '고합': '20', '초기': '21', '기': '22',
+    '가':   'A',  '나':   'B',  '다':   'C',  '라':   'D',
+    '마':   'E',  '바':   'F',  '사':   'G',  '아':   'H',
+    '자':   'I',  '차':   'J',  '카':   'K',  '타':   'L',
+    '파':   'M',  '하':   'N',  '거':   'O',  '너':   'P',
+    '더':   'Q',  '러':   'R',  '머':   'S',  '버':   'T',
+    '서':   'U',  '어':   'V',  '저':   'W',  '처':   'X',
+    '커':   'Y',  '터':   'Z',
+    '가단': 'GA', '가합': 'GB', '고':   'GO', '고합': 'GH',
+    '노':   'NO', '초기': 'CK', '기':   'KI',
 }
+
+# ── WebSquare 셀렉터 (신규 사이트) ────────────
+SEL_COURT   = '#mf_ssgoTopMainTab_contents_content1_body_sbx_cortCd'
+SEL_YEAR    = '#mf_ssgoTopMainTab_contents_content1_body_sbx_csYr'
+SEL_TYPE    = '#mf_ssgoTopMainTab_contents_content1_body_sbx_csDvsCd'
+SEL_SERIAL  = '#mf_ssgoTopMainTab_contents_content1_body_ibx_csSerial'
+SEL_CAPTCHA_INPUT  = '#mf_ssgoTopMainTab_contents_content1_body_ibx_answer'
+SEL_CAPTCHA_IMG    = '#mf_ssgoTopMainTab_contents_content1_body_img_captcha'
+SEL_CAPTCHA_RELOAD = '#mf_ssgoTopMainTab_contents_content1_body_btn_reloadCaptcha'
+SEL_SEARCH  = '#mf_ssgoTopMainTab_contents_content1_body_btn_srchCs'
 
 
 # ──────────────────────────────────────────────
@@ -113,33 +136,43 @@ def parse_case_no(case_no: str):
 
 
 # ──────────────────────────────────────────────
-# 캡차 처리
+# 신규 사이트 캡차 처리 (blob URL → 요소 screenshot)
 # ──────────────────────────────────────────────
 async def get_captcha_answer(page: Page) -> str | None:
-    """캡차 이미지를 가져와 ML로 예측"""
-    # 캡차 이미지 URL에서 바이트 가져오기
-    captcha_img = page.locator('#captcha img')
-    src = await captcha_img.get_attribute('src')
-    base_url = TARGET_URL.rsplit('/', 2)[0]
-    img_url = base_url + '/' + src.lstrip('/')
-
-    # 페이지 컨텍스트로 이미지 요청
-    response = await page.request.get(img_url)
-    img_bytes = await response.body()
-    return predict_captcha(img_bytes)
+    """캡차 img 요소를 직접 screenshot해서 ML 예측"""
+    try:
+        captcha_el = page.locator(SEL_CAPTCHA_IMG)
+        await captcha_el.wait_for(timeout=5000)
+        img_bytes = await captcha_el.screenshot()
+        return predict_captcha(img_bytes)
+    except Exception as e:
+        print(f"  캡차 이미지 캡처 실패: {e}")
+        return None
 
 
 # ──────────────────────────────────────────────
-# 결과 파싱
+# WebSquare select 선택 (일반 select_option 미작동 시 JS 폴백)
 # ──────────────────────────────────────────────
-def safe_text(el) -> str:
-    if el is None:
-        return ''
-    return el.strip() if isinstance(el, str) else ''
+async def ws_select(page: Page, selector: str, value: str):
+    """WebSquare select 요소 값 설정"""
+    try:
+        await page.select_option(selector, value=value)
+        await page.wait_for_timeout(300)
+    except Exception:
+        # WebSquare는 커스텀 컴포넌트일 수 있어 JS로 폴백
+        await page.eval_on_selector(
+            selector,
+            f"(el, v) => {{ el.value = v; el.dispatchEvent(new Event('change', {{bubbles:true}})); }}",
+            value
+        )
+        await page.wait_for_timeout(300)
 
 
+# ──────────────────────────────────────────────
+# 결과 파싱 (신규 사이트 구조 기준)
+# ──────────────────────────────────────────────
 async def parse_result(page: Page, court: str, case_no: str) -> dict:
-    """검색 결과 페이지에서 데이터 추출"""
+    """검색 결과 화면에서 데이터 추출"""
     now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     data = {h: '' for h in OUTPUT_HEADERS}
     data['법원'] = court
@@ -147,86 +180,87 @@ async def parse_result(page: Page, court: str, case_no: str) -> dict:
     data['조회일시'] = now
 
     try:
-        # ── 기본내용 ──────────────────────────────
-        async def get_cell(label: str) -> str:
+        # ── th 라벨로 값 추출 (테이블 기반) ──────
+        async def get_by_label(label: str) -> str:
             try:
-                # 라벨 텍스트로 th 찾고 다음 td 값 추출
-                th = page.locator(f'th:has-text("{label}")')
-                count = await th.count()
-                if count == 0:
-                    return ''
-                td = th.first.locator('xpath=following-sibling::td[1]')
+                # th 안에 label 텍스트가 포함된 요소 찾고 sibling td 추출
+                loc = page.locator(f'th:has-text("{label}")')
+                if await loc.count() == 0:
+                    # WebSquare div/span 기반 시도
+                    loc = page.locator(f'*:has-text("{label}")').filter(
+                        has=page.locator('xpath=following-sibling::*[1]')
+                    )
+                    if await loc.count() == 0:
+                        return ''
+                    sib = loc.first.locator('xpath=following-sibling::*[1]')
+                    return (await sib.inner_text()).strip()
+                td = loc.first.locator('xpath=following-sibling::td[1]')
                 return (await td.inner_text()).strip()
             except Exception:
                 return ''
 
-        data['사건명']       = await get_cell('사건명')
-        data['재판부']       = await get_cell('재판부')
-        data['접수일']       = await get_cell('접수일')
-        data['종국결과']     = await get_cell('종국결과')
-        data['결정문송달일'] = await get_cell('결정문송달일')
-        data['확정일']       = await get_cell('확정일')
+        data['사건명']       = await get_by_label('사건명')
+        data['재판부']       = await get_by_label('재판부')
+        data['접수일']       = await get_by_label('접수일')
+        data['종국결과']     = await get_by_label('종국결과')
+        data['결정문송달일'] = await get_by_label('결정문송달일')
+        data['확정일']       = await get_by_label('확정일')
 
-        # ── 진행내용 탭 클릭 ──────────────────────
+        # ── 진행내용 탭 ───────────────────────────
         try:
-            tab = page.locator('li.subTab2, a:has-text("진행내용")')
-            if await tab.count() > 0:
-                await tab.first.click()
-                await page.wait_for_timeout(800)
+            # 신규 사이트의 진행내용 탭 버튼 (텍스트로 탐색)
+            tab_btn = page.locator('button, a, div[role="tab"]').filter(has_text='진행내용')
+            if await tab_btn.count() > 0:
+                await tab_btn.first.click()
+                await page.wait_for_timeout(1000)
 
-            rows = page.locator('#subTab2 .tableHor tbody tr, .tabCont2 table tbody tr')
-            row_count = await rows.count()
-            # 최신 3행 (마지막부터)
-            targets = []
-            for i in range(row_count - 1, max(row_count - 4, -1), -1):
-                targets.append(i)
-            targets.reverse()
+            # 진행 행 추출 (날짜 + 내용 패턴)
+            prog_rows = page.locator('table tbody tr').filter(
+                has=page.locator('td')
+            )
+            cnt = await prog_rows.count()
+            collected = []
+            for i in range(cnt):
+                tr = prog_rows.nth(i)
+                tds = tr.locator('td')
+                if await tds.count() >= 2:
+                    d = (await tds.nth(0).inner_text()).strip()
+                    # 날짜 패턴 확인 (YYYY.MM.DD 또는 YYYY-MM-DD)
+                    if re.match(r'\d{4}[.\-]\d{2}[.\-]\d{2}', d):
+                        content_text = (await tds.nth(1).inner_text()).strip()
+                        result_text = (await tds.nth(2).inner_text()).strip() if await tds.count() > 2 else ''
+                        collected.append((d, content_text, result_text))
 
-            for idx, slot in enumerate(targets[:3], 1):
-                row = rows.nth(slot)
-                cols = row.locator('td')
-                col_count = await cols.count()
-                if col_count >= 2:
-                    data[f'진행_{idx}일자'] = (await cols.nth(0).inner_text()).strip()
-                    data[f'진행_{idx}내용'] = (await cols.nth(1).inner_text()).strip()
-                    data[f'진행_{idx}결과'] = (await cols.nth(2).inner_text()).strip() if col_count > 2 else ''
+            # 최신 3건 (뒤에서부터)
+            for slot_idx, (d, c, r) in enumerate(collected[-3:][::-1], 1):
+                data[f'진행_{slot_idx}일자'] = d
+                data[f'진행_{slot_idx}내용'] = c
+                data[f'진행_{slot_idx}결과'] = r
         except Exception as e:
             print(f"  진행내용 파싱 오류: {e}")
 
         # ── 관련사건 ──────────────────────────────
         try:
-            rel_rows = page.locator('td:has-text("관련사건") ~ td, .tableHor:has-text("관련사건") tbody tr')
-            # 기본내용 화면의 관련사건 테이블
-            rel_table = page.locator('table').filter(has_text='관련사건내용')
-            if await rel_table.count() > 0:
-                r = rel_table.first.locator('tbody tr').first
-                tds = r.locator('td')
-                if await tds.count() >= 2:
-                    data['관련사건_법원'] = (await tds.nth(0).inner_text()).strip()
-                    data['관련사건_번호'] = (await tds.nth(1).inner_text()).strip()
-            else:
-                # 일반 테이블에서 시도
-                rows2 = page.locator('table tbody tr').filter(has_text='타경')
-                if await rows2.count() > 0:
-                    tds = rows2.first.locator('td')
+            rel_section = page.locator('table, div').filter(has_text='관련사건')
+            if await rel_section.count() > 0:
+                rel_rows = rel_section.first.locator('tbody tr')
+                if await rel_rows.count() > 0:
+                    tds = rel_rows.first.locator('td')
                     if await tds.count() >= 2:
                         data['관련사건_법원'] = (await tds.nth(0).inner_text()).strip()
                         data['관련사건_번호'] = (await tds.nth(1).inner_text()).strip()
         except Exception as e:
             print(f"  관련사건 파싱 오류: {e}")
 
-        # ── 당사자내용 ────────────────────────────
+        # ── 당사자 ────────────────────────────────
         try:
-            party_rows = page.locator('table').filter(has_text='당사자내용')
-            if await party_rows.count() == 0:
-                party_rows = page.locator('table').filter(has_text='신청인')
-
-            if await party_rows.count() > 0:
-                trs = party_rows.first.locator('tbody tr')
-                cnt = await trs.count()
+            party_section = page.locator('table, div').filter(has_text='신청인')
+            if await party_section.count() > 0:
+                p_rows = party_section.first.locator('tbody tr')
+                p_cnt = await p_rows.count()
                 applicants, respondents = [], []
-                for i in range(cnt):
-                    tr = trs.nth(i)
+                for i in range(p_cnt):
+                    tr = p_rows.nth(i)
                     tds = tr.locator('td')
                     if await tds.count() < 2:
                         continue
@@ -248,7 +282,7 @@ async def parse_result(page: Page, court: str, case_no: str) -> dict:
 
 
 # ──────────────────────────────────────────────
-# 단건 조회
+# 단건 조회 (신규 사이트)
 # ──────────────────────────────────────────────
 async def search_one(page: Page, court: str, case_no: str) -> dict:
     print(f"  조회: {court} / {case_no}")
@@ -256,80 +290,86 @@ async def search_one(page: Page, court: str, case_no: str) -> dict:
     year, case_type, serial = parse_case_no(case_no)
     court_val = COURT_NAME_MAP.get(court, '')
     if not court_val:
-        print(f"  ⚠ 법원명 매핑 없음: {court}")
+        print(f"  ⚠ 법원명 매핑 없음: {court} — 빈값으로 진행")
 
     for attempt in range(1, MAX_CAPTCHA_RETRY + 1):
         try:
-            await page.goto(TARGET_URL, wait_until='networkidle', timeout=30000)
+            # 페이지 이동 (첫 시도만 full load, 이후는 캡차 새로고침만)
+            if attempt == 1:
+                await page.goto(TARGET_URL, wait_until='networkidle', timeout=40000)
+                # WebSquare 초기화 대기
+                await page.wait_for_selector(SEL_COURT, timeout=15000)
 
-            # 법원 선택
+            # ── 법원 선택 ──
             if court_val:
-                await page.select_option('#sch_bub_nm', value=court_val)
-                await page.wait_for_timeout(300)
+                await ws_select(page, SEL_COURT, court_val)
 
-            # 연도
-            await page.select_option('#sel_sa_year', value=year)
+            # ── 연도 ──
+            await ws_select(page, SEL_YEAR, year)
 
-            # 사건구분
+            # ── 사건구분 ──
             type_val = CASE_TYPE_MAP.get(case_type, '')
             if type_val:
-                await page.select_option('#sa_gubun', value=type_val)
-                await page.wait_for_timeout(300)
-
-            # 일련번호
-            await page.fill('#sa_serial', serial)
-
-            # 캡차
-            captcha_answer = await get_captcha_answer(page)
-            if captcha_answer is None:
-                captcha_answer = input(f"  캡차 수동 입력 (시도 {attempt}): ").strip()
+                await ws_select(page, SEL_TYPE, type_val)
             else:
+                print(f"  ⚠ 사건구분 매핑 없음: {case_type}")
+
+            # ── 일련번호 ──
+            await page.fill(SEL_SERIAL, serial)
+
+            # ── 캡차 ──
+            if attempt > 1:
+                # 캡차 새로고침 버튼 클릭
+                reload_btn = page.locator(SEL_CAPTCHA_RELOAD)
+                if await reload_btn.count() > 0:
+                    await reload_btn.click()
+                    await page.wait_for_timeout(800)
+
+            captcha_answer = await get_captcha_answer(page)
+            if captcha_answer:
                 print(f"  캡차 예측: {captcha_answer} (시도 {attempt})")
-
-            await page.fill('#answer', captcha_answer)
-
-            # 검색 버튼
-            await page.click('.tableVer .redBtn, button[type=submit], input[type=submit]')
-            await page.wait_for_timeout(1500)
-
-            # 오류 알림 체크
-            alert_triggered = False
-            def handle_dialog(dialog):
-                nonlocal alert_triggered
-                alert_triggered = True
-                asyncio.create_task(dialog.accept())
-
-            page.on('dialog', handle_dialog)
-            await page.wait_for_timeout(500)
-
-            if alert_triggered:
-                print(f"  캡차 오류 또는 사건 없음 → 재시도")
+            else:
+                print(f"  캡차 OCR 실패 — 재시도 {attempt}")
+                await page.wait_for_timeout(500)
                 continue
 
-            # 결과 확인
+            await page.fill(SEL_CAPTCHA_INPUT, captcha_answer)
+
+            # ── 검색 ──
+            await page.click(SEL_SEARCH)
+            await page.wait_for_timeout(2000)
+
+            # ── 결과 확인 ──
             content = await page.content()
-            if '사건이 존재하지 않습니다' in content:
+
+            # 캡차 오류 패턴
+            if any(k in content for k in ['자동입력방지', '캡차', 'captcha', '인증번호가 일치하지']):
+                print(f"  캡차 불일치 → 재시도")
+                continue
+
+            # 사건 없음
+            if any(k in content for k in ['사건이 존재하지 않습니다', '조회된 사건이 없습니다', '검색결과가 없습니다']):
                 print(f"  ℹ 사건 없음")
                 return {h: '' for h in OUTPUT_HEADERS} | {
                     '법원': court, '사건번호': case_no,
                     '사건명': '사건없음', '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
 
-            if '자동입력방지' in content and attempt < MAX_CAPTCHA_RETRY:
-                print(f"  캡차 불일치 → 재시도")
-                continue
-
-            # 성공 → 파싱
+            # 성공 → 결과 파싱
             return await parse_result(page, court, case_no)
 
         except PlaywrightTimeout:
-            print(f"  타임아웃 (시도 {attempt})")
+            print(f"  타임아웃 (시도 {attempt}) — 페이지 재로드")
+            try:
+                await page.goto(TARGET_URL, wait_until='networkidle', timeout=40000)
+                await page.wait_for_selector(SEL_COURT, timeout=15000)
+            except Exception:
+                pass
             continue
         except Exception as e:
             print(f"  오류 (시도 {attempt}): {e}")
             continue
 
-    # 최대 재시도 초과
     return {h: '' for h in OUTPUT_HEADERS} | {
         '법원': court, '사건번호': case_no,
         '사건명': '조회실패', '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
@@ -344,7 +384,6 @@ def write_output(results: list[dict], path: str):
     ws = wb.active
     ws.title = '조회결과'
 
-    # 헤더 스타일
     header_fill = PatternFill(start_color='1F4E79', end_color='1F4E79', fill_type='solid')
     header_font = Font(bold=True, color='FFFFFF', size=10)
 
@@ -354,13 +393,10 @@ def write_output(results: list[dict], path: str):
         cell.font = header_font
         cell.alignment = Alignment(horizontal='center', vertical='center')
 
-    # 데이터
     for row_idx, data in enumerate(results, 2):
         for col, header in enumerate(OUTPUT_HEADERS, 1):
-            val = data.get(header, '')
-            ws.cell(row=row_idx, column=col, value=val)
+            ws.cell(row=row_idx, column=col, value=data.get(header, ''))
 
-    # 열 너비 자동조정
     col_widths = {
         1: 20, 2: 16, 3: 24, 4: 20,
         5: 12, 6: 20, 7: 14, 8: 12,
@@ -396,11 +432,11 @@ async def main():
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=HEADLESS,
-            args=['--no-sandbox', '--disable-dev-shm-usage']
+            args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled']
         )
         context = await browser.new_context(
             locale='ko-KR',
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         )
         page = await context.new_page()
 
@@ -408,7 +444,7 @@ async def main():
             print(f"[{i}/{len(cases)}]", end=' ')
             data = await search_one(page, case['court'], case['case_no'])
             results.append(data)
-            await asyncio.sleep(1)  # 서버 부하 방지
+            await asyncio.sleep(2)  # 서버 부하 방지
 
         await browser.close()
 
