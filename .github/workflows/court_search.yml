@@ -3,9 +3,19 @@ name: 대법원 사건검색 자동조회
 on:
   workflow_dispatch:
     inputs:
-      input_sha:
-        description: 'input.xlsx SHA (업로드 후 자동 입력)'
+      input_file:
+        description: '조회 입력 파일'
+        type: choice
+        options:
+          - input.xlsx
+          - test_input.xlsx
+        default: input.xlsx
+        required: true
+      prepare_only:
+        description: '입력 점검만 실행 (검색 미제출)'
+        type: boolean
         required: false
+        default: true
 
 permissions:
   contents: read
@@ -33,18 +43,29 @@ jobs:
           pip install --break-system-packages -r court-search/requirements.txt
           playwright install chromium --with-deps
 
-      - name: input.xlsx 확인
+      - name: 입력 파일 확인
+        env:
+          INPUT_FILE: ${{ inputs.input_file }}
         run: |
-          if [ ! -f "court-search/input.xlsx" ]; then
-            echo "❌ court-search/input.xlsx 없음"
+          case "$INPUT_FILE" in
+            input.xlsx|test_input.xlsx) ;;
+            *) echo "허용되지 않은 입력 파일"; exit 1 ;;
+          esac
+          if [ ! -f "court-search/$INPUT_FILE" ]; then
+            echo "❌ 입력 파일 없음: $INPUT_FILE"
             exit 1
           fi
-          echo "✅ input.xlsx 확인"
+          echo "✅ 입력 파일 확인: $INPUT_FILE"
 
       - name: 사건검색 실행
+        env:
+          INPUT_FILE: ${{ inputs.input_file }}
+          PREPARE_ONLY: ${{ inputs.prepare_only }}
         run: |
           cd court-search
-          python search.py input.xlsx output.xlsx
+          args=("$INPUT_FILE" output.xlsx)
+          if [ "$PREPARE_ONLY" = "true" ]; then args+=(--prepare-only); fi
+          python search.py "${args[@]}"
 
       - name: 결과 파일 생성 확인
         run: |

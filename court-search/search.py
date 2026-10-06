@@ -288,7 +288,7 @@ async def parse_result(page: Page, court: str, case_no: str) -> dict:
 # ──────────────────────────────────────────────
 # 단건 조회 (신규 사이트)
 # ──────────────────────────────────────────────
-async def search_one(page: Page, court: str, case_no: str, party_name: str = '주택') -> dict:
+async def search_one(page: Page, court: str, case_no: str, party_name: str = '주택', prepare_only: bool = False) -> dict:
     print(f"  조회: {court} / {case_no}")
 
     year, case_type, serial = parse_case_no(case_no)
@@ -321,6 +321,14 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
             # ── 일련번호 ──
             await page.fill(SEL_SERIAL, serial)
             await page.fill(SEL_PARTY, party_name)
+
+            if prepare_only:
+                print("  입력값 확인 완료 — 검색 제출 생략")
+                return {h: '' for h in OUTPUT_HEADERS} | {
+                    '법원': court, '사건번호': case_no,
+                    '사건명': '입력점검 완료',
+                    '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
 
             # ── 캡차 ──
             if attempt > 1:
@@ -423,8 +431,10 @@ def write_output(results: list[dict], path: str):
 # 메인
 # ──────────────────────────────────────────────
 async def main():
-    input_path  = sys.argv[1] if len(sys.argv) > 1 else INPUT_FILE
-    output_path = sys.argv[2] if len(sys.argv) > 2 else OUTPUT_FILE
+    cli_args = [arg for arg in sys.argv[1:] if arg != '--prepare-only']
+    prepare_only = '--prepare-only' in sys.argv[1:]
+    input_path = cli_args[0] if cli_args else INPUT_FILE
+    output_path = cli_args[1] if len(cli_args) > 1 else OUTPUT_FILE
 
     if not os.path.exists(input_path):
         print(f"입력 파일 없음: {input_path}")
@@ -447,7 +457,7 @@ async def main():
 
         for i, case in enumerate(cases, 1):
             print(f"[{i}/{len(cases)}]", end=' ')
-            data = await search_one(page, case['court'], case['case_no'], case['party_name'])
+            data = await search_one(page, case['court'], case['case_no'], case['party_name'], prepare_only)
             results.append(data)
             await asyncio.sleep(2)  # 서버 부하 방지
 
