@@ -404,7 +404,6 @@ async def main():
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=HEADLESS,
-            executable_path='/opt/pw-browsers/chromium',
             args=['--no-sandbox', '--disable-dev-shm-usage']
         )
         context = await browser.new_context(
