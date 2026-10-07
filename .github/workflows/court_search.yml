@@ -67,7 +67,7 @@ jobs:
         env:
           INPUT_FILE: ${{ inputs.input_file }}
           PREPARE_ONLY: ${{ inputs.prepare_only }}
-          DEBUG_DIR: court-search/debug
+          DEBUG_DIR: debug
         run: |
           cd court-search
           args=("$INPUT_FILE" output.xlsx)
@@ -94,6 +94,12 @@ jobs:
               failed = [row[:3] for row in rows[1:] if row[column] != '입력점검 완료']
               if failed:
                   raise SystemExit(f'입력점검 실패: {failed}')
+          else:
+              column = rows[0].index('사건명')
+              failed = [row[:3] for row in rows[1:]
+                        if not row[column] or str(row[column]).startswith('조회실패')]
+              if failed:
+                  raise SystemExit(f'조회 결과 확인 실패: {failed}')
           print(f"✅ 결과 파일 생성: {wb.active.max_row - 1}건")
           PY
 
