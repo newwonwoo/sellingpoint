@@ -282,7 +282,11 @@ async def parse_result(page: Page, court: str, case_no: str) -> dict:
     tables = await result_tables(page)
     if os.environ.get('DEBUG_TABLES') == '1':
         print('  결과 표 요약:', [t['text'][:180].replace('\n', '|') for t in tables])
-    progress = next((t for t in tables if '일자' in t['text'] and '내용' in t['text']), None)
+    progress_candidates = [t for t in tables
+                           if '일자' in t['text'] and '내용' in t['text']]
+    progress = next((t for t in progress_candidates
+                     if '결과' in t['text'] or '공시문' in t['text']),
+                    progress_candidates[0] if progress_candidates else None)
     collected = []
     if progress:
         for row in progress['rows']:
