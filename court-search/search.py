@@ -280,6 +280,8 @@ async def parse_result(page: Page, court: str, case_no: str) -> dict:
     # 진행내용은 별도 탭에 있으며, 일자/내용 헤더 표를 찾는다.
     await click_progress_tab(page)
     tables = await result_tables(page)
+    if os.environ.get('DEBUG_TABLES') == '1':
+        print('  결과 표 요약:', [t['text'][:180].replace('\n', '|') for t in tables])
     progress = next((t for t in tables if '일자' in t['text'] and '내용' in t['text']), None)
     collected = []
     if progress:

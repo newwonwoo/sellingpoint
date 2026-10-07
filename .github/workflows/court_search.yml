@@ -69,6 +69,7 @@ jobs:
           INPUT_FILE: ${{ inputs.input_file }}
           PREPARE_ONLY: ${{ inputs.prepare_only }}
           DEBUG_DIR: debug
+          DEBUG_TABLES: '1'
         run: |
           cd court-search
           args=("$INPUT_FILE" output.xlsx)
