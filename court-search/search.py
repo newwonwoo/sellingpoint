@@ -199,113 +199,101 @@ async def select_court(page: Page, court: str):
 # ──────────────────────────────────────────────
 # 결과 파싱 (신규 사이트 구조 기준)
 # ──────────────────────────────────────────────
+async def result_tables(page: Page) -> list[dict]:
+    """WebSquare 표를 일반적인 행/셀 배열로 변환한다."""
+    tables = []
+    for frame in page.frames:
+        try:
+            rows = await frame.locator('table').evaluate_all("""
+                tables => tables.map(table => ({
+                  text: (table.innerText || '').trim(),
+                  rows: Array.from(table.querySelectorAll('tr')).map(row =>
+                    Array.from(row.querySelectorAll(':scope > th, :scope > td'))
+                      .map(cell => (cell.innerText || '').replace(/\\s+/g, ' ').trim())
+                      .filter(Boolean)
+                  ).filter(row => row.length)
+                })).filter(table => table.rows.length)
+            """)
+            tables.extend(rows)
+        except Exception:
+            continue
+    return tables
+
+
+def table_pairs(rows: list[list[str]]) -> dict[str, str]:
+    """기본내용 표의 [라벨, 값, 라벨, 값] 구조를 평탄화한다."""
+    pairs = {}
+    for row in rows:
+        for i in range(0, len(row) - 1, 2):
+            label, value = row[i].strip(), row[i + 1].strip()
+            if label and value and label not in pairs:
+                pairs[label] = value
+    return pairs
+
+
+async def click_progress_tab(page: Page):
+    """결과 화면의 진행내용 탭을 열어 진행 표를 렌더링한다."""
+    candidates = [
+        page.locator('button, a, [role="tab"]').filter(has_text='진행내용'),
+        page.locator('input[value*="진행내용"]'),
+    ]
+    for candidate in candidates:
+        try:
+            if await candidate.count() > 0:
+                await candidate.first.click()
+                await page.wait_for_timeout(700)
+                return
+        except Exception:
+            continue
+
+
 async def parse_result(page: Page, court: str, case_no: str) -> dict:
-    """검색 결과 화면에서 데이터 추출"""
-    now = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    """기본내용·진행내용·관련사건·당사자 표를 각각 읽는다."""
     data = {h: '' for h in OUTPUT_HEADERS}
-    data['법원'] = court
-    data['사건번호'] = case_no
-    data['조회일시'] = now
+    data.update({'법원': court, '사건번호': case_no,
+                 '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S')})
+    tables = await result_tables(page)
 
-    try:
-        # ── th 라벨로 값 추출 (테이블 기반) ──────
-        async def get_by_label(label: str) -> str:
-            try:
-                # th 안에 label 텍스트가 포함된 요소 찾고 sibling td 추출
-                loc = page.locator(f'th:has-text("{label}")')
-                if await loc.count() == 0:
-                    # WebSquare div/span 기반 시도
-                    loc = page.locator(f'*:has-text("{label}")').filter(
-                        has=page.locator('xpath=following-sibling::*[1]')
-                    )
-                    if await loc.count() == 0:
-                        return ''
-                    sib = loc.first.locator('xpath=following-sibling::*[1]')
-                    return (await sib.inner_text()).strip()
-                td = loc.first.locator('xpath=following-sibling::td[1]')
-                return (await td.inner_text()).strip()
-            except Exception:
-                return ''
+    # 기본내용: 사건명·접수일·재판부가 함께 있는 표
+    basic = next((t for t in tables if '사건명' in t['text'] and '접수일' in t['text']
+                  and '재판부' in t['text']), None)
+    if basic:
+        pairs = table_pairs(basic['rows'])
+        for field in ('사건명', '재판부', '접수일', '종국결과', '결정문송달일', '확정일'):
+            data[field] = pairs.get(field, '')
 
-        data['사건명']       = await get_by_label('사건명')
-        data['재판부']       = await get_by_label('재판부')
-        data['접수일']       = await get_by_label('접수일')
-        data['종국결과']     = await get_by_label('종국결과')
-        data['결정문송달일'] = await get_by_label('결정문송달일')
-        data['확정일']       = await get_by_label('확정일')
+    # 진행내용은 별도 탭에 있으며, 일자/내용 헤더 표를 찾는다.
+    await click_progress_tab(page)
+    tables = await result_tables(page)
+    progress = next((t for t in tables if '일자' in t['text'] and '내용' in t['text']), None)
+    collected = []
+    if progress:
+        for row in progress['rows']:
+            if len(row) >= 2 and re.match(r'\d{4}[.\-]\d{2}[.\-]\d{2}', row[0]):
+                collected.append((row[0], row[1], row[2] if len(row) > 2 else ''))
+    for slot, (date, content, result) in enumerate(collected[-3:][::-1], 1):
+        data[f'진행_{slot}일자'] = date
+        data[f'진행_{slot}내용'] = content
+        data[f'진행_{slot}결과'] = result
 
-        # ── 진행내용 탭 ───────────────────────────
-        try:
-            # 신규 사이트의 진행내용 탭 버튼 (텍스트로 탐색)
-            tab_btn = page.locator('button, a, div[role="tab"]').filter(has_text='진행내용')
-            if await tab_btn.count() > 0:
-                await tab_btn.first.click()
-                await page.wait_for_timeout(1000)
+    related = next((t for t in tables if '법원' in t['text'] and '사건번호' in t['text']
+                    and '구분' in t['text']), None)
+    if related:
+        rows = [r for r in related['rows'] if len(r) >= 2 and r[0] not in ('법원',)]
+        if rows:
+            data['관련사건_법원'], data['관련사건_번호'] = rows[0][0], rows[0][1]
 
-            # 진행 행 추출 (날짜 + 내용 패턴)
-            prog_rows = page.locator('table tbody tr').filter(
-                has=page.locator('td')
-            )
-            cnt = await prog_rows.count()
-            collected = []
-            for i in range(cnt):
-                tr = prog_rows.nth(i)
-                tds = tr.locator('td')
-                if await tds.count() >= 2:
-                    d = (await tds.nth(0).inner_text()).strip()
-                    # 날짜 패턴 확인 (YYYY.MM.DD 또는 YYYY-MM-DD)
-                    if re.match(r'\d{4}[.\-]\d{2}[.\-]\d{2}', d):
-                        content_text = (await tds.nth(1).inner_text()).strip()
-                        result_text = (await tds.nth(2).inner_text()).strip() if await tds.count() > 2 else ''
-                        collected.append((d, content_text, result_text))
-
-            # 최신 3건 (뒤에서부터)
-            for slot_idx, (d, c, r) in enumerate(collected[-3:][::-1], 1):
-                data[f'진행_{slot_idx}일자'] = d
-                data[f'진행_{slot_idx}내용'] = c
-                data[f'진행_{slot_idx}결과'] = r
-        except Exception as e:
-            print(f"  진행내용 파싱 오류: {e}")
-
-        # ── 관련사건 ──────────────────────────────
-        try:
-            rel_section = page.locator('table, div').filter(has_text='관련사건')
-            if await rel_section.count() > 0:
-                rel_rows = rel_section.first.locator('tbody tr')
-                if await rel_rows.count() > 0:
-                    tds = rel_rows.first.locator('td')
-                    if await tds.count() >= 2:
-                        data['관련사건_법원'] = (await tds.nth(0).inner_text()).strip()
-                        data['관련사건_번호'] = (await tds.nth(1).inner_text()).strip()
-        except Exception as e:
-            print(f"  관련사건 파싱 오류: {e}")
-
-        # ── 당사자 ────────────────────────────────
-        try:
-            party_section = page.locator('table, div').filter(has_text='신청인')
-            if await party_section.count() > 0:
-                p_rows = party_section.first.locator('tbody tr')
-                p_cnt = await p_rows.count()
-                applicants, respondents = [], []
-                for i in range(p_cnt):
-                    tr = p_rows.nth(i)
-                    tds = tr.locator('td')
-                    if await tds.count() < 2:
-                        continue
-                    role = (await tds.nth(0).inner_text()).strip()
-                    name = (await tds.nth(1).inner_text()).strip()
-                    if '신청인' in role and '피' not in role:
-                        applicants.append(name)
-                    elif '피신청인' in role:
-                        respondents.append(name)
-                data['신청인']   = ', '.join(applicants)
-                data['피신청인'] = ', '.join(respondents)
-        except Exception as e:
-            print(f"  당사자 파싱 오류: {e}")
-
-    except Exception as e:
-        print(f"  결과 파싱 전체 오류: {e}")
-
+    party = next((t for t in tables if '구분' in t['text'] and '이름' in t['text']), None)
+    if party:
+        applicants, respondents = [], []
+        for row in party['rows']:
+            if len(row) < 2 or row[0] == '구분':
+                continue
+            if '신청인' in row[0] and '피' not in row[0]:
+                applicants.append(row[1])
+            elif '피신청인' in row[0]:
+                respondents.append(row[1])
+        data['신청인'], data['피신청인'] = ', '.join(applicants), ', '.join(respondents)
     return data
 
 
@@ -331,6 +319,21 @@ async def save_result_debug(page: Page, case_no: str):
             print(f"  결과 프레임: url={frame.url[:120]} tables={await frame.locator('table').count()} labels={labels} text={len(body)}")
         except Exception as e:
             print(f"  결과 프레임 진단 실패: {e}")
+
+
+async def wait_for_result_page(page: Page, timeout_ms: int = 12000) -> bool:
+    """검색 후 비동기로 렌더링되는 기본내용 표를 기다린다."""
+    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
+    while asyncio.get_running_loop().time() < deadline:
+        for frame in page.frames:
+            try:
+                text = await frame.locator('body').inner_text(timeout=1000)
+                if all(label in text for label in ('사건명', '재판부', '접수일')):
+                    return True
+            except Exception:
+                continue
+        await page.wait_for_timeout(300)
+    return False
 
 
 # ──────────────────────────────────────────────
@@ -394,17 +397,22 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
 
             # ── 검색 ──
             await page.click(SEL_SEARCH)
-            await page.wait_for_timeout(2000)
 
             # ── 결과 확인 ──
+            if not await wait_for_result_page(page):
+                content = await page.content()
+                if any(k in content for k in ['인증번호가 일치하지', '자동입력방지문자가 틀', '자동 입력 방지 문자가 틀']):
+                    print("  캡차 불일치 → 재시도")
+                    continue
+                print("  결과 화면 로딩 실패 — 검색 응답을 확인할 수 없음")
+                await save_result_debug(page, case_no)
+                return {h: '' for h in OUTPUT_HEADERS} | {
+                    '법원': court, '사건번호': case_no,
+                    '사건명': '조회실패: 결과 화면 미확인',
+                    '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                }
+
             content = await page.content()
-
-            # 캡차 오류 패턴
-            if any(k in content for k in ['자동입력방지', '캡차', 'captcha', '인증번호가 일치하지']):
-                print(f"  캡차 불일치 → 재시도")
-                continue
-
-            # 사건 없음
             if any(k in content for k in ['사건이 존재하지 않습니다', '조회된 사건이 없습니다', '검색결과가 없습니다']):
                 print(f"  ℹ 사건 없음")
                 return {h: '' for h in OUTPUT_HEADERS} | {
@@ -508,6 +516,12 @@ async def main():
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         )
         page = await context.new_page()
+
+        async def handle_dialog(dialog):
+            print(f"  사이트 알림: {dialog.message[:300]}")
+            await dialog.dismiss()
+
+        page.on('dialog', handle_dialog)
 
         for i, case in enumerate(cases, 1):
             print(f"[{i}/{len(cases)}]", end=' ')
