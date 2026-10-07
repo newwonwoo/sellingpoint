@@ -67,6 +67,7 @@ jobs:
         env:
           INPUT_FILE: ${{ inputs.input_file }}
           PREPARE_ONLY: ${{ inputs.prepare_only }}
+          DEBUG_DIR: court-search/debug
         run: |
           cd court-search
           args=("$INPUT_FILE" output.xlsx)
@@ -101,7 +102,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: court-search-result
-          path: court-search/output.xlsx
+          path: |
+            court-search/output.xlsx
+            court-search/debug
           if-no-files-found: ignore
 
       - name: 완료 요약

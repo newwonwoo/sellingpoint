@@ -11,6 +11,7 @@ import sys
 import os
 import io
 import re
+from pathlib import Path
 from datetime import datetime
 
 import openpyxl
@@ -308,6 +309,30 @@ async def parse_result(page: Page, court: str, case_no: str) -> dict:
     return data
 
 
+async def save_result_debug(page: Page, case_no: str):
+    """결과 파싱 실패 시 실제 DOM을 보존해 사이트 구조 변경을 진단한다."""
+    root = Path(os.environ.get('DEBUG_DIR', '/tmp/court-search-debug'))
+    root.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r'[^0-9A-Za-z가-힣_-]', '_', case_no)
+    try:
+        await page.screenshot(path=str(root / f'{safe}.png'), full_page=True)
+    except Exception as e:
+        print(f"  결과 화면 캡처 실패: {e}")
+    try:
+        (root / f'{safe}.html').write_text(await page.content(), encoding='utf-8')
+    except Exception as e:
+        print(f"  결과 DOM 저장 실패: {e}")
+    print(f"  결과 진단 저장: {root / safe}")
+    for frame in page.frames:
+        try:
+            body = (await frame.locator('body').inner_text(timeout=2000)).strip()
+            labels = {label: await frame.get_by_text(label, exact=True).count()
+                      for label in ('사건명', '재판부', '접수일', '진행내용', '신청인')}
+            print(f"  결과 프레임: url={frame.url[:120]} tables={await frame.locator('table').count()} labels={labels} text={len(body)}")
+        except Exception as e:
+            print(f"  결과 프레임 진단 실패: {e}")
+
+
 # ──────────────────────────────────────────────
 # 단건 조회 (신규 사이트)
 # ──────────────────────────────────────────────
@@ -388,7 +413,12 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
                 }
 
             # 성공 → 결과 파싱
-            return await parse_result(page, court, case_no)
+            result = await parse_result(page, court, case_no)
+            if not result.get('사건명'):
+                await save_result_debug(page, case_no)
+                result['사건명'] = '조회실패: 결과 파싱 실패'
+                print("  결과 화면은 열렸지만 사건명 추출에 실패")
+            return result
 
         except ValueError as e:
             print(f"  입력 오류: {e}")
