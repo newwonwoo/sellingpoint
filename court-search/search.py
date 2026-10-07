@@ -507,7 +507,10 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
         except PlaywrightTimeout as e:
             page_ready = False
             detail = str(e).replace('\n', ' ')[:180]
-            if 'Page.goto' in detail or 'navigating to' in detail:
+            # goto뿐 아니라 초기 WebSquare 셀렉터 대기도 사이트 접속 단계다.
+            # HTML 일부만 내려오고 초기화가 끝나지 않는 경우도 같은 접속
+            # 장애로 분류해야 무한히 재시도하지 않는다.
+            if stage == '사이트 접속' or 'Page.goto' in detail or 'navigating to' in detail:
                 failure_reason = '법원 사이트 연결 실패'
                 connection_failures += 1
                 print(f"  ❌ 접속 시간 초과: {TARGET_URL} (단계: {stage}, 시도 {attempt})")
