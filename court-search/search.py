@@ -676,8 +676,10 @@ async def main():
     print(f"조회 워커 {worker_count}개로 실행합니다.")
 
     results = [{} for _ in cases]
+    # EasyOCR 모델은 하나만 메모리에 올린다. 캡차 요청은 이 전용 실행부에
+    # 순서대로 들어가며 브라우저 3개는 네트워크/결과 대기를 계속 병렬 수행한다.
     ocr_executor = ThreadPoolExecutor(
-        max_workers=worker_count, thread_name_prefix='captcha-ocr'
+        max_workers=1, thread_name_prefix='captcha-ocr'
     )
     async with async_playwright() as p:
         browser = await p.chromium.launch(
