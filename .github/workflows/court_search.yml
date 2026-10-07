@@ -70,7 +70,9 @@ jobs:
         env:
           INPUT_FILE: ${{ inputs.input_file }}
           PREPARE_ONLY: ${{ inputs.prepare_only }}
-          COURT_WORKERS: '2'
+          COURT_WORKERS: '3'
+          OCR_TORCH_THREADS: '1'
+          CAPTCHA_DATA_DIR: captcha-success
           DEBUG_DIR: debug
           DEBUG_TABLES: '1'
         run: |
@@ -119,6 +121,7 @@ jobs:
           path: |
             court-search/output.xlsx
             court-search/debug
+            court-search/captcha-success
           if-no-files-found: ignore
 
       - name: 완료 요약
@@ -128,4 +131,7 @@ jobs:
             ls -lh court-search/output.xlsx
           else
             echo "output.xlsx 없음"
+          fi
+          if [ -f "court-search/captcha-success/labels.jsonl" ]; then
+            echo "통과 캡차 학습 샘플: $(wc -l < court-search/captcha-success/labels.jsonl)건"
           fi

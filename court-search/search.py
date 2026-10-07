@@ -7,10 +7,14 @@
 """
 
 import asyncio
+import hashlib
+import json
 import sys
 import os
 import io
 import re
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime
 
@@ -19,7 +23,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeout
 
 sys.path.insert(0, os.path.dirname(__file__))
-from captcha_solver import predict_captcha
+from captcha_solver import learn_success, predict_captcha
 
 # ──────────────────────────────────────────────
 # 설정
@@ -28,7 +32,7 @@ TARGET_URL = 'https://ssgo.scourt.go.kr/ssgo/index.on?cortId=www'
 # 캡차가 계속 틀릴 때 한 사건이 지나치게 오래 붙잡히지 않도록 제한한다.
 # 정상 환경의 실제 단건 실행은 첫 시도에 통과했다.
 MAX_CAPTCHA_RETRY = 5
-    # 접속 자체가 되지 않는 경우에는 캡차 재시도와 분리한다. 법원 사이트가
+# 접속 자체가 되지 않는 경우에는 캡차 재시도와 분리한다. 법원 사이트가
 # 내려가 있거나 러너에서 연결이 막힌 상태로 20회까지 기다리면 한 건도
 # 오래 멈추므로, 짧게 재시도한 뒤 해당 사건을 실패 처리한다.
 MAX_CONNECTION_RETRY = 3
@@ -37,6 +41,10 @@ HEADLESS = True
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INPUT_FILE = os.path.join(BASE_DIR, 'input.xlsx')
 OUTPUT_FILE = os.path.join(BASE_DIR, 'output.xlsx')
+CAPTCHA_DATA_DIR = os.environ.get(
+    'CAPTCHA_DATA_DIR', os.path.join(BASE_DIR, 'captcha-success')
+)
+CAPTCHA_SAMPLE_LOCK = threading.Lock()
 
 OUTPUT_HEADERS = [
     '법원', '사건번호', '사건명', '재판부',
@@ -155,29 +163,67 @@ def parse_case_no(case_no: str):
 # ──────────────────────────────────────────────
 # 신규 사이트 캡차 처리 (blob URL → 요소 screenshot)
 # ──────────────────────────────────────────────
-async def get_captcha_answer(page: Page) -> str | None:
+async def run_captcha_ocr(
+    img_bytes: bytes, executor: ThreadPoolExecutor | None
+) -> str | None:
+    """CPU OCR를 전용 스레드에서 실행해 다른 브라우저 워커를 막지 않는다."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(executor, predict_captcha, img_bytes)
+
+
+async def get_captcha_answer(
+    page: Page, executor: ThreadPoolExecutor | None
+) -> tuple[str | None, bytes | None, str]:
     """캡차 요소를 우선 읽고, 실패하면 렌더링 화면 영역을 저배율로 재캡처한다."""
     try:
         captcha_el = page.locator(SEL_CAPTCHA_IMG)
         await captcha_el.wait_for(timeout=5000)
         img_bytes = await captcha_el.screenshot(animations='disabled')
-        answer = predict_captcha(img_bytes)
+        answer = await run_captcha_ocr(img_bytes, executor)
         if answer:
-            return answer
+            return answer, img_bytes, 'element'
 
         # 일부 WebSquare 화면은 img 요소 캡처와 실제 표시 화면의 픽셀이
         # 다르게 합성된다. 이때 CSS 배율의 화면 캡처를 OCR에 재시도한다.
         box = await captcha_el.bounding_box()
         if box:
             rendered_bytes = await page.screenshot(clip=box, scale='css')
-            answer = predict_captcha(rendered_bytes)
+            answer = await run_captcha_ocr(rendered_bytes, executor)
             if answer:
                 print('  캡차 화면 캡처 보조 인식 성공')
-            return answer
-        return None
+            return answer, rendered_bytes, 'rendered'
+        return None, None, ''
     except Exception as e:
         print(f"  캡차 이미지 캡처 실패: {e}")
-        return None
+        return None, None, ''
+
+
+def save_success_captcha(img_bytes: bytes, answer: str, source: str):
+    """검색 결과 화면까지 통과한 캡차만 정답 데이터셋으로 저장한다."""
+    if not img_bytes or not answer:
+        return
+    digest = hashlib.sha256(img_bytes).hexdigest()
+    root = Path(CAPTCHA_DATA_DIR)
+    image_path = root / 'images' / f'{digest}.png'
+    metadata_path = root / 'labels.jsonl'
+    record = {
+        'image': f'images/{image_path.name}',
+        'answer': answer,
+        'source': source,
+        'sha256': digest,
+        'accepted_at': datetime.now().isoformat(timespec='seconds'),
+    }
+    with CAPTCHA_SAMPLE_LOCK:
+        image_path.parent.mkdir(parents=True, exist_ok=True)
+        if image_path.exists():
+            return
+        image_path.write_bytes(img_bytes)
+        with metadata_path.open('a', encoding='utf-8') as fp:
+            fp.write(json.dumps(record, ensure_ascii=False) + '\n')
+    learned_count = learn_success(img_bytes, answer)
+    print(
+        f"  ✅ 통과 캡차 학습 반영: {answer} ({source}, 누적 {learned_count}건)"
+    )
 
 
 # ──────────────────────────────────────────────
@@ -387,7 +433,14 @@ async def wait_for_result_page(page: Page, timeout_ms: int = 12000) -> bool:
 # ──────────────────────────────────────────────
 # 단건 조회 (신규 사이트)
 # ──────────────────────────────────────────────
-async def search_one(page: Page, court: str, case_no: str, party_name: str = '주택', prepare_only: bool = False) -> dict:
+async def search_one(
+    page: Page,
+    court: str,
+    case_no: str,
+    party_name: str = '주택',
+    prepare_only: bool = False,
+    ocr_executor: ThreadPoolExecutor | None = None,
+) -> dict:
     print(f"  조회: {court} / {case_no}")
 
     year, case_type, serial = parse_case_no(case_no)
@@ -446,7 +499,9 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
                     await reload_btn.click()
                     await page.wait_for_timeout(800)
 
-            captcha_answer = await get_captcha_answer(page)
+            captcha_answer, captcha_image, captcha_source = await get_captcha_answer(
+                page, ocr_executor
+            )
             if captcha_answer:
                 print(f"  캡차 예측: {captcha_answer} (시도 {attempt})")
             else:
@@ -481,6 +536,10 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
                     '사건명': '조회실패: 결과 화면 미확인',
                     '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
+
+            # 결과 화면의 기본 필드가 확인된 시점에만 OCR 답을 정답으로
+            # 확정한다. 캡차 불일치와 응답 미확인 이미지는 저장하지 않는다.
+            save_success_captcha(captcha_image, captcha_answer, captcha_source)
 
             content = await page.content()
             if any(k in content for k in ['사건이 존재하지 않습니다', '조회된 사건이 없습니다', '검색결과가 없습니다']):
@@ -605,18 +664,21 @@ async def main():
     cases = read_input(input_path)
     print(f"총 {len(cases)}건 조회 시작\n")
 
-    # 법원 사이트 요청은 무제한 병렬화하면 차단될 수 있으므로 기본 2개
-    # 워커만 사용한다. 필요하면 Actions 환경변수로 1개까지 낮출 수 있다.
+    # 입력 건수를 먼저 확인하고 최대 3개 워커가 공용 큐에서 한 건씩
+    # 가져간다. 먼저 끝난 워커가 다음 순번을 즉시 이어받는다.
     try:
-        worker_count = int(os.environ.get('COURT_WORKERS', '2'))
+        worker_count = int(os.environ.get('COURT_WORKERS', '3'))
     except ValueError:
-        worker_count = 2
+        worker_count = 3
     worker_count = max(1, min(worker_count, len(cases))) if cases else 1
     if prepare_only:
         worker_count = 1
     print(f"조회 워커 {worker_count}개로 실행합니다.")
 
     results = [{} for _ in cases]
+    ocr_executor = ThreadPoolExecutor(
+        max_workers=worker_count, thread_name_prefix='captcha-ocr'
+    )
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=HEADLESS,
@@ -665,11 +727,15 @@ async def main():
                     print(f"[{prefix} 워커 {worker_id + 1}]", end=' ')
                     try:
                         results[idx] = await search_one(
-                            page, case['court'], case['case_no'], case['party_name'], prepare_only
+                            page,
+                            case['court'],
+                            case['case_no'],
+                            case['party_name'],
+                            prepare_only,
+                            ocr_executor,
                         )
                     finally:
                         queue.task_done()
-                    await asyncio.sleep(2)  # 워커별 서버 부하 방지
 
             await asyncio.gather(*[
                 worker(worker_id, page) for worker_id, (_, page) in enumerate(pages)
@@ -690,6 +756,7 @@ async def main():
                 await run_batch(failed, retry=True)
 
         await browser.close()
+    ocr_executor.shutdown(wait=True)
 
     write_output(results, output_path)
 
