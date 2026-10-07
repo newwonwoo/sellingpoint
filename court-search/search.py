@@ -644,6 +644,8 @@ async def main():
         async def run_batch(indices, retry=False):
             """인덱스 목록을 워커에 나눠 실행하고 결과 순서는 원본을 유지한다."""
             queue = asyncio.Queue()
+            retry_positions = {idx: pos + 1 for pos, idx in enumerate(indices)}
+            retry_total = len(indices)
             for idx in indices:
                 queue.put_nowait(idx)
 
@@ -656,8 +658,11 @@ async def main():
                     except asyncio.QueueEmpty:
                         return
                     case = cases[idx]
-                    prefix = '재시도 ' if retry else ''
-                    print(f"[{prefix}{idx + 1}/{len(cases)} 워커 {worker_id + 1}]", end=' ')
+                    if retry:
+                        prefix = f"재시도 {retry_positions[idx]}/{retry_total}"
+                    else:
+                        prefix = f"{idx + 1}/{len(cases)}"
+                    print(f"[{prefix} 워커 {worker_id + 1}]", end=' ')
                     try:
                         results[idx] = await search_one(
                             page, case['court'], case['case_no'], case['party_name'], prepare_only

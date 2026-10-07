@@ -70,7 +70,7 @@ jobs:
         env:
           INPUT_FILE: ${{ inputs.input_file }}
           PREPARE_ONLY: ${{ inputs.prepare_only }}
-          COURT_WORKERS: '2'
+          COURT_WORKERS: '3'
           DEBUG_DIR: debug
           DEBUG_TABLES: '1'
         run: |
