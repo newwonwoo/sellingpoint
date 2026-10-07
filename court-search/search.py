@@ -631,6 +631,24 @@ async def main():
             results.append(data)
             await asyncio.sleep(2)  # 서버 부하 방지
 
+        # 1차 조회에서 접속 장애·캡차 오류 등으로 실패한 사건만 마지막에
+        # 한 번 더 시도한다. 성공한 행은 그대로 보존하고, 재시도 결과가
+        # 실패해도 최신 실패 사유를 결과 파일에 남긴다.
+        if not prepare_only:
+            failed = [
+                (idx, case) for idx, (case, data) in enumerate(zip(cases, results))
+                if str(data.get('사건명', '')).startswith('조회실패')
+            ]
+            if failed:
+                print(f"\n실패 사건 재조회 시작: {len(failed)}건 (각 사건 1회)")
+                for retry_no, (idx, case) in enumerate(failed, 1):
+                    print(f"[재시도 {retry_no}/{len(failed)}]", end=' ')
+                    retry_data = await search_one(
+                        page, case['court'], case['case_no'], case['party_name'], False
+                    )
+                    results[idx] = retry_data
+                    await asyncio.sleep(2)
+
         await browser.close()
 
     write_output(results, output_path)
