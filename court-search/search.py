@@ -172,6 +172,22 @@ async def ws_select(page: Page, selector: str, value: str):
     await page.wait_for_timeout(300)
 
 
+async def select_court(page: Page, court: str):
+    """실제 사이트 옵션에서 법원명을 찾아 선택; 지원 약칭은 유일할 때만 허용."""
+    options = await page.locator(SEL_COURT + ' option').evaluate_all(
+        '(options) => options.map(o => ({value: o.value, label: o.textContent.trim()}))'
+    )
+    name = re.sub(r'\s+', '', court)
+    exact = [o for o in options if re.sub(r'\s+', '', o['label']) == name]
+    matches = exact or [o for o in options if name.endswith('지원')
+                       and re.sub(r'\s+', '', o['label']).endswith(name)]
+    if len(matches) != 1:
+        raise ValueError(f'법원 선택 불가 또는 중복: {court} ({len(matches)}개 옵션)')
+    await page.select_option(SEL_COURT, value=matches[0]['value'])
+    print(f"  법원 선택 확인: {matches[0]['label']}")
+    await page.wait_for_timeout(300)
+
+
 # ──────────────────────────────────────────────
 # 결과 파싱 (신규 사이트 구조 기준)
 # ──────────────────────────────────────────────
@@ -292,9 +308,6 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
     print(f"  조회: {court} / {case_no}")
 
     year, case_type, serial = parse_case_no(case_no)
-    court_val = COURT_NAME_MAP.get(court, '')
-    if not court_val:
-        print(f"  ⚠ 법원명 매핑 없음: {court} — 빈값으로 진행")
 
     for attempt in range(1, MAX_CAPTCHA_RETRY + 1):
         try:
@@ -305,8 +318,7 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
                 await page.wait_for_selector(SEL_COURT, timeout=15000)
 
             # ── 법원 선택 ──
-            if court_val:
-                await ws_select(page, SEL_COURT, court_val)
+            await select_court(page, court)
 
             # ── 연도 ──
             await ws_select(page, SEL_YEAR, year)

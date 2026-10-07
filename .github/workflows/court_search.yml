@@ -68,16 +68,35 @@ jobs:
           python search.py "${args[@]}"
 
       - name: 결과 파일 생성 확인
+        env:
+          PREPARE_ONLY: ${{ inputs.prepare_only }}
         run: |
           python - <<'PY'
+          import os
           import openpyxl
           from pathlib import Path
           path = Path("court-search/output.xlsx")
           if not path.exists():
               raise SystemExit("❌ output.xlsx 없음")
           wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
+          rows = list(wb.active.iter_rows(values_only=True))
+          if len(rows) < 2:
+              raise SystemExit('결과가 비어 있습니다')
+          if os.environ['PREPARE_ONLY'] == 'true':
+              column = rows[0].index('사건명')
+              failed = [row[:3] for row in rows[1:] if row[column] != '입력점검 완료']
+              if failed:
+                  raise SystemExit(f'입력점검 실패: {failed}')
           print(f"✅ 결과 파일 생성: {wb.active.max_row - 1}건")
           PY
+
+      - name: 결과 엑셀 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: court-search-result
+          path: court-search/output.xlsx
+          if-no-files-found: ignore
 
       - name: 완료 요약
         if: always()
