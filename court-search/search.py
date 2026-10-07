@@ -174,6 +174,9 @@ async def ws_select(page: Page, selector: str, value: str):
 
 async def select_court(page: Page, court: str):
     """실제 사이트 옵션에서 법원명을 찾아 선택; 지원 약칭은 유일할 때만 허용."""
+    await page.wait_for_function(
+        '(selector) => document.querySelector(selector)?.options.length > 10',
+        arg=SEL_COURT, timeout=20000)
     options = await page.locator(SEL_COURT + ' option').evaluate_all(
         '(options) => options.map(o => ({value: o.value, label: o.textContent.trim()}))'
     )
@@ -181,6 +184,7 @@ async def select_court(page: Page, court: str):
     exact = [o for o in options if re.sub(r'\s+', '', o['label']) == name]
     matches = exact or [o for o in options if name.endswith('지원')
                        and re.sub(r'\s+', '', o['label']).endswith(name)]
+    matches = list({o['value']: o for o in matches}.values())
     if len(matches) != 1:
         raise ValueError(f'법원 선택 불가 또는 중복: {court} ({matches})')
     await page.select_option(SEL_COURT, value=matches[0]['value'])

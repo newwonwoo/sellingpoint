@@ -39,8 +39,14 @@ jobs:
           cache-dependency-path: court-search/requirements.txt
 
       - name: 의존성 설치
+        env:
+          PREPARE_ONLY: ${{ inputs.prepare_only }}
         run: |
-          pip install --break-system-packages -r court-search/requirements.txt
+          if [ "$PREPARE_ONLY" = "true" ]; then
+            pip install playwright==1.49.0 openpyxl==3.1.5 Pillow==11.0.0
+          else
+            pip install -r court-search/requirements.txt
+          fi
           playwright install chromium --with-deps
 
       - name: 입력 파일 확인
