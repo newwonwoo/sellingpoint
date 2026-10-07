@@ -181,6 +181,9 @@ async def select_court(page: Page, court: str):
         '(options) => options.map(o => ({value: o.value, label: o.textContent.trim()}))'
     )
     name = re.sub(r'\s+', '', court)
+    # 사이트는 수원지방법원 평택지원을 '평택지원'으로 표시한다.
+    if name == '수원지방법원평택지원':
+        name = '평택지원'
     exact = [o for o in options if re.sub(r'\s+', '', o['label']) == name]
     matches = exact or [o for o in options if name.endswith('지원')
                        and re.sub(r'\s+', '', o['label']).endswith(name)]
