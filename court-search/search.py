@@ -284,9 +284,13 @@ async def parse_result(page: Page, court: str, case_no: str) -> dict:
         print('  결과 표 요약:', [t['text'][:180].replace('\n', '|') for t in tables])
     progress_candidates = [t for t in tables
                            if '일자' in t['text'] and '내용' in t['text']]
-    progress = next((t for t in progress_candidates
-                     if '결과' in t['text'] or '공시문' in t['text']),
-                    progress_candidates[0] if progress_candidates else None)
+    # 최근기일내용 표도 '결과' 열을 포함하므로, 진행내용 표의 고유 열인
+    # '공시문'을 먼저 찾고, 구형 화면의 '진행구분' 표기를 다음으로 본다.
+    progress = next((t for t in progress_candidates if '공시문' in t['text']), None)
+    if progress is None:
+        progress = next((t for t in progress_candidates if '진행구분' in t['text']), None)
+    if progress is None and progress_candidates:
+        progress = progress_candidates[-1]
     collected = []
     if progress:
         for row in progress['rows']:
