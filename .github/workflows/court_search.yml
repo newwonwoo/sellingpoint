@@ -9,7 +9,7 @@ on:
         options:
           - input.xlsx
           - test_input.xlsx
-        default: input.xlsx
+        default: test_input.xlsx
         required: true
       prepare_only:
         description: '입력 점검만 실행 (검색 미제출)'
