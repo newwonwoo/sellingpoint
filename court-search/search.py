@@ -396,9 +396,14 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
             await page.fill(SEL_CAPTCHA_INPUT, captcha_answer)
 
             # ── 검색 ──
+            page._last_dialog_message = ''
             await page.click(SEL_SEARCH)
 
             # ── 결과 확인 ──
+            dialog_message = getattr(page, '_last_dialog_message', '')
+            if '자동입력 방지문자가 일치하지' in dialog_message:
+                print("  캡차 불일치 → 새 캡차로 재시도")
+                continue
             if not await wait_for_result_page(page):
                 content = await page.content()
                 if any(k in content for k in ['인증번호가 일치하지', '자동입력방지문자가 틀', '자동 입력 방지 문자가 틀']):
@@ -516,8 +521,10 @@ async def main():
             user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
         )
         page = await context.new_page()
+        page._last_dialog_message = ''
 
         async def handle_dialog(dialog):
+            page._last_dialog_message = dialog.message
             print(f"  사이트 알림: {dialog.message[:300]}")
             await dialog.dismiss()
 
