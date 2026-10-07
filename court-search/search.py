@@ -3,7 +3,7 @@
 - 대상: https://ssgo.scourt.go.kr/ssgo/index.on?cortId=www (신규 WebSquare 기반)
 - input.xlsx: 법원, 사건번호 → output.xlsx: 25개 칼럼 결과
 - 캡차: blob URL → 요소 screenshot → EasyOCR (숫자 6자리)
-- 최대 20회 캡차 재시도
+- 캡차 최대 5회 재시도, 사이트 접속 최대 3회 재시도
 """
 
 import asyncio
