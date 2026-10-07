@@ -182,7 +182,7 @@ async def select_court(page: Page, court: str):
     matches = exact or [o for o in options if name.endswith('지원')
                        and re.sub(r'\s+', '', o['label']).endswith(name)]
     if len(matches) != 1:
-        raise ValueError(f'법원 선택 불가 또는 중복: {court} ({len(matches)}개 옵션)')
+        raise ValueError(f'법원 선택 불가 또는 중복: {court} ({matches})')
     await page.select_option(SEL_COURT, value=matches[0]['value'])
     print(f"  법원 선택 확인: {matches[0]['label']}")
     await page.wait_for_timeout(300)
@@ -383,6 +383,9 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
             # 성공 → 결과 파싱
             return await parse_result(page, court, case_no)
 
+        except ValueError as e:
+            print(f"  입력 오류: {e}")
+            break
         except PlaywrightTimeout:
             print(f"  타임아웃 (시도 {attempt}) — 페이지 재로드")
             try:
