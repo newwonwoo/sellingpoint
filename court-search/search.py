@@ -233,15 +233,30 @@ def table_pairs(rows: list[list[str]]) -> dict[str, str]:
 
 async def click_progress_tab(page: Page):
     """결과 화면의 진행내용 탭을 열어 진행 표를 렌더링한다."""
-    candidates = [
-        page.locator('button, a, [role="tab"]').filter(has_text='진행내용'),
-        page.locator('input[value*="진행내용"]'),
-    ]
-    for candidate in candidates:
+    for frame in page.frames:
         try:
-            if await candidate.count() > 0:
-                await candidate.first.click()
-                await page.wait_for_timeout(700)
+            clicked = await frame.evaluate("""
+                () => {
+                  const visible = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+                  const candidates = [...document.querySelectorAll('*')].filter(e => {
+                    const text = (e.textContent || '').trim();
+                    const value = (e.value || '').trim();
+                    const role = e.getAttribute('role') || '';
+                    const cls = String(e.className || '');
+                    return visible(e) && (text === '진행내용' || value === '진행내용') &&
+                      (['A','BUTTON','INPUT'].includes(e.tagName) || role === 'tab' || /tab|trigger|btn/i.test(cls));
+                  });
+                  if (!candidates.length) return false;
+                  candidates[0].click();
+                  return true;
+                }
+            """)
+            if clicked:
+                for _ in range(20):
+                    text = await frame.locator('body').inner_text(timeout=1000)
+                    if '공시문' in text or ('진행구분' in text and '내용' in text):
+                        return
+                    await page.wait_for_timeout(300)
                 return
         except Exception:
             continue
