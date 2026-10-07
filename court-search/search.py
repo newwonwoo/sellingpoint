@@ -309,11 +309,11 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
 
     year, case_type, serial = parse_case_no(case_no)
 
-    for attempt in range(1, MAX_CAPTCHA_RETRY + 1):
+    for attempt in range(1, (1 if prepare_only else MAX_CAPTCHA_RETRY) + 1):
         try:
             # 페이지 이동 (첫 시도만 full load, 이후는 캡차 새로고침만)
             if attempt == 1:
-                await page.goto(TARGET_URL, wait_until='networkidle', timeout=40000)
+                await page.goto(TARGET_URL, wait_until='domcontentloaded', timeout=40000)
                 # WebSquare 초기화 대기
                 await page.wait_for_selector(SEL_COURT, timeout=15000)
 
@@ -388,6 +388,8 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
             break
         except PlaywrightTimeout:
             print(f"  타임아웃 (시도 {attempt}) — 페이지 재로드")
+            if prepare_only:
+                break
             try:
                 await page.goto(TARGET_URL, wait_until='networkidle', timeout=40000)
                 await page.wait_for_selector(SEL_COURT, timeout=15000)

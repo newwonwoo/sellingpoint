@@ -65,7 +65,7 @@ jobs:
           cd court-search
           args=("$INPUT_FILE" output.xlsx)
           if [ "$PREPARE_ONLY" = "true" ]; then args+=(--prepare-only); fi
-          python search.py "${args[@]}"
+          python -u search.py "${args[@]}"
 
       - name: 결과 파일 생성 확인
         env:
