@@ -422,7 +422,9 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
 
             # ── 결과 확인 ──
             dialog_message = getattr(page, '_last_dialog_message', '')
-            if '자동입력 방지문자가 일치하지' in dialog_message:
+            if '자동입력 방지문자' in dialog_message and (
+                '일치하지' in dialog_message or '다시 입력' in dialog_message
+            ):
                 print("  캡차 불일치 → 새 캡차로 재시도")
                 continue
             if not await wait_for_result_page(page):
