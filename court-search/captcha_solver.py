@@ -6,7 +6,7 @@
 
 import io
 import re
-from PIL import Image, ImageFilter, ImageEnhance
+from PIL import Image, ImageFilter, ImageEnhance, ImageOps
 
 # EasyOCR은 첫 실행 시 모델 다운로드 (약 100MB, 이후 캐시)
 _reader = None
@@ -19,13 +19,16 @@ def _get_reader():
     return _reader
 
 
-def preprocess_image(img: Image.Image) -> Image.Image:
-    """캡차 이미지 전처리 — 대비 강화 + 샤프닝"""
-    img = img.convert('L')                        # 그레이스케일
-    img = img.resize((240, 80), Image.LANCZOS)    # 2배 확대 (OCR 정확도 향상)
-    img = ImageEnhance.Contrast(img).enhance(2.5) # 대비 강화
-    img = img.filter(ImageFilter.SHARPEN)         # 샤프닝
-    return img
+def preprocess_variants(img: Image.Image) -> list[Image.Image]:
+    """선·배경 노이즈가 다른 캡차를 위해 여러 입력을 만든다."""
+    gray = img.convert('L').resize((360, 120), Image.Resampling.LANCZOS)
+    contrast = ImageOps.autocontrast(gray)
+    sharp = ImageEnhance.Sharpness(ImageEnhance.Contrast(contrast).enhance(2.5)).enhance(2.0)
+    median = sharp.filter(ImageFilter.MedianFilter(3))
+    variants = [gray, contrast, sharp, median]
+    for threshold in (130, 165, 200):
+        variants.append(sharp.point(lambda p, t=threshold: 255 if p > t else 0))
+    return variants
 
 
 def predict_captcha(img_bytes: bytes) -> str:
@@ -35,20 +38,28 @@ def predict_captcha(img_bytes: bytes) -> str:
     """
     try:
         reader = _get_reader()
-        img = Image.open(io.BytesIO(img_bytes))
-        img = preprocess_image(img)
-
-        # 바이트로 변환해서 EasyOCR에 전달
-        buf = io.BytesIO()
-        img.save(buf, format='PNG')
-        buf.seek(0)
-
-        results = reader.readtext(buf.read(), allowlist='0123456789', detail=0)
-        text = ''.join(results)
-        digits = re.sub(r'\D', '', text)  # 숫자만 추출
-
-        if len(digits) >= 6:
-            return digits[:6]
+        original = Image.open(io.BytesIO(img_bytes))
+        candidates = []
+        for variant in preprocess_variants(original):
+            buf = io.BytesIO()
+            variant.save(buf, format='PNG')
+            results = reader.readtext(
+                buf.getvalue(), allowlist='0123456789', detail=1,
+                paragraph=False, decoder='beamsearch', mag_ratio=1.0)
+            text = ''.join(item[1] for item in results)
+            digits = re.sub(r'\D', '', text)
+            if len(digits) >= 6:
+                confidence = sum(float(item[2]) for item in results)
+                candidates.append((digits[:6], confidence))
+        if candidates:
+            # 여러 전처리에서 같은 답이 나오면 우선하고, 아니면 신뢰도 합이 큰 답을 쓴다.
+            counts = {}
+            for digits, confidence in candidates:
+                total, best = counts.get(digits, (0, 0.0))
+                counts[digits] = (total + 1, max(best, confidence))
+            answer = max(counts, key=lambda d: (counts[d][0], counts[d][1]))
+            print(f"  캡차 후보: {', '.join(f'{d}:{n}' for d,(n,_) in counts.items())}")
+            return answer
         return None
     except Exception as e:
         print(f"캡차 OCR 실패: {e}")
