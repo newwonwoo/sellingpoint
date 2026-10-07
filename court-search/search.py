@@ -605,49 +605,84 @@ async def main():
     cases = read_input(input_path)
     print(f"총 {len(cases)}건 조회 시작\n")
 
-    results = []
+    # 법원 사이트 요청은 무제한 병렬화하면 차단될 수 있으므로 기본 2개
+    # 워커만 사용한다. 필요하면 Actions 환경변수로 1개까지 낮출 수 있다.
+    try:
+        worker_count = int(os.environ.get('COURT_WORKERS', '2'))
+    except ValueError:
+        worker_count = 2
+    worker_count = max(1, min(worker_count, len(cases))) if cases else 1
+    if prepare_only:
+        worker_count = 1
+    print(f"조회 워커 {worker_count}개로 실행합니다.")
+
+    results = [{} for _ in cases]
     async with async_playwright() as p:
         browser = await p.chromium.launch(
             headless=HEADLESS,
             args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled']
         )
-        context = await browser.new_context(
-            locale='ko-KR',
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        )
-        page = await context.new_page()
-        page._last_dialog_message = ''
 
-        async def handle_dialog(dialog):
-            page._last_dialog_message = dialog.message
-            print(f"  사이트 알림: {dialog.message[:300]}")
-            await dialog.dismiss()
+        async def make_page(worker_id: int):
+            context = await browser.new_context(
+                locale='ko-KR',
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            )
+            page = await context.new_page()
+            page._last_dialog_message = ''
 
-        page.on('dialog', handle_dialog)
+            async def handle_dialog(dialog):
+                page._last_dialog_message = dialog.message
+                print(f"  워커 {worker_id} 사이트 알림: {dialog.message[:300]}")
+                await dialog.dismiss()
 
-        for i, case in enumerate(cases, 1):
-            print(f"[{i}/{len(cases)}]", end=' ')
-            data = await search_one(page, case['court'], case['case_no'], case['party_name'], prepare_only)
-            results.append(data)
-            await asyncio.sleep(2)  # 서버 부하 방지
+            page.on('dialog', handle_dialog)
+            return context, page
+
+        pages = [await make_page(worker_id) for worker_id in range(worker_count)]
+
+        async def run_batch(indices, retry=False):
+            """인덱스 목록을 워커에 나눠 실행하고 결과 순서는 원본을 유지한다."""
+            queue = asyncio.Queue()
+            for idx in indices:
+                queue.put_nowait(idx)
+
+            async def worker(worker_id, page):
+                # 워커가 동시에 첫 요청을 쏘지 않도록 작은 간격을 둔다.
+                await asyncio.sleep(worker_id * 0.5)
+                while True:
+                    try:
+                        idx = queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        return
+                    case = cases[idx]
+                    prefix = '재시도 ' if retry else ''
+                    print(f"[{prefix}{idx + 1}/{len(cases)} 워커 {worker_id + 1}]", end=' ')
+                    try:
+                        results[idx] = await search_one(
+                            page, case['court'], case['case_no'], case['party_name'], prepare_only
+                        )
+                    finally:
+                        queue.task_done()
+                    await asyncio.sleep(2)  # 워커별 서버 부하 방지
+
+            await asyncio.gather(*[
+                worker(worker_id, page) for worker_id, (_, page) in enumerate(pages)
+            ])
+
+        await run_batch(range(len(cases)))
 
         # 1차 조회에서 접속 장애·캡차 오류 등으로 실패한 사건만 마지막에
         # 한 번 더 시도한다. 성공한 행은 그대로 보존하고, 재시도 결과가
         # 실패해도 최신 실패 사유를 결과 파일에 남긴다.
         if not prepare_only:
             failed = [
-                (idx, case) for idx, (case, data) in enumerate(zip(cases, results))
+                idx for idx, data in enumerate(results)
                 if str(data.get('사건명', '')).startswith('조회실패')
             ]
             if failed:
                 print(f"\n실패 사건 재조회 시작: {len(failed)}건 (각 사건 1회)")
-                for retry_no, (idx, case) in enumerate(failed, 1):
-                    print(f"[재시도 {retry_no}/{len(failed)}]", end=' ')
-                    retry_data = await search_one(
-                        page, case['court'], case['case_no'], case['party_name'], False
-                    )
-                    results[idx] = retry_data
-                    await asyncio.sleep(2)
+                await run_batch(failed, retry=True)
 
         await browser.close()
 
