@@ -186,8 +186,11 @@ async def select_court(page: Page, court: str):
     if name == '수원지방법원평택지원':
         name = '평택지원'
     exact = [o for o in options if re.sub(r'\s+', '', o['label']) == name]
-    matches = exact or [o for o in options if name.endswith('지원')
-                       and re.sub(r'\s+', '', o['label']).endswith(name)]
+    # 본원명을 포함한 입력(예: "인천지방법원 부천지원")은 사이트의
+    # 표시명("부천지원")으로 끝나는 유일한 지원을 선택한다.
+    matches = exact or [o for o in options
+                        if name.endswith('지원')
+                        and name.endswith(re.sub(r'\s+', '', o['label']))]
     matches = list({o['value']: o for o in matches}.values())
     if len(matches) != 1:
         raise ValueError(f'법원 선택 불가 또는 중복: {court} ({matches})')
