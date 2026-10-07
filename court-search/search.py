@@ -26,6 +26,10 @@ from captcha_solver import predict_captcha
 # ──────────────────────────────────────────────
 TARGET_URL = 'https://ssgo.scourt.go.kr/ssgo/index.on?cortId=www'
 MAX_CAPTCHA_RETRY = 20
+# 접속 자체가 되지 않는 경우에는 캡차 재시도와 분리한다. 법원 사이트가
+# 내려가 있거나 러너에서 연결이 막힌 상태로 20회까지 기다리면 한 건도
+# 오래 멈추므로, 짧게 재시도한 뒤 해당 사건을 실패 처리한다.
+MAX_CONNECTION_RETRY = 3
 HEADLESS = True
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -388,6 +392,7 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
     page_ready = False
     stage = '사이트 접속'
     failure_reason = '재시도 한도 초과'
+    connection_failures = 0
 
     for attempt in range(1, (1 if prepare_only else MAX_CAPTCHA_RETRY) + 1):
         try:
@@ -400,6 +405,7 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
                 # WebSquare 초기화 대기
                 await page.wait_for_selector(SEL_COURT, timeout=15000)
                 page_ready = True
+                connection_failures = 0
 
             # ── 법원 선택 ──
             stage = '법원 선택'
@@ -501,12 +507,16 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
             detail = str(e).replace('\n', ' ')[:180]
             if 'Page.goto' in detail or 'navigating to' in detail:
                 failure_reason = '법원 사이트 연결 실패'
+                connection_failures += 1
                 print(f"  ❌ 접속 시간 초과: {TARGET_URL} (단계: {stage}, 시도 {attempt})")
-                print("  안내: 법원 사이트가 응답하지 않아 잠시 후 새 연결로 재시도합니다.")
+                print(f"  안내: 법원 사이트가 응답하지 않아 새 연결로 재시도합니다 ({connection_failures}/{MAX_CONNECTION_RETRY}).")
             else:
                 failure_reason = f'{stage} 단계 시간 초과'
                 print(f"  ❌ {stage} 단계 시간 초과 (시도 {attempt}): {detail}")
             if prepare_only:
+                break
+            if connection_failures >= MAX_CONNECTION_RETRY:
+                print(f"  ⏹ 사이트 접속 {MAX_CONNECTION_RETRY}회 실패 — 이 사건을 중단하고 다음 사건으로 이동합니다.")
                 break
             try:
                 await page.wait_for_timeout(min(3000 * attempt, 15000))
@@ -518,7 +528,12 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
             detail = str(e).replace('\n', ' ')[:220]
             if any(token in detail for token in ('ERR_CONNECTION', 'net::', 'Connection timed out')):
                 failure_reason = '법원 사이트 연결 실패'
+                connection_failures += 1
                 print(f"  ❌ 법원 사이트 연결 실패 (단계: {stage}, 시도 {attempt}): {detail}")
+                print(f"  안내: 새 연결로 재시도합니다 ({connection_failures}/{MAX_CONNECTION_RETRY}).")
+                if not prepare_only and connection_failures >= MAX_CONNECTION_RETRY:
+                    print(f"  ⏹ 사이트 접속 {MAX_CONNECTION_RETRY}회 실패 — 이 사건을 중단하고 다음 사건으로 이동합니다.")
+                    break
             else:
                 failure_reason = f'{stage} 단계 오류'
                 print(f"  ❌ {stage} 단계 오류 (시도 {attempt}): {detail}")
