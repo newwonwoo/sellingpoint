@@ -1,19 +1,23 @@
 /**
  * GET /api/court-search-status
- * 가장 최근 GitHub Actions 실행 상태 반환
+ * GitHub Actions 실행 상태 반환.
+ * headSha가 있으면 해당 입력 커밋에서 시작한 실행만 찾는다.
  */
 
 export default async function handler(req, res) {
   const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-  const REPO = 'newwonwoo/sellingpoint';
+  const REPO = process.env.GITHUB_REPO || 'newwonwoo/sellingpoint';
+  const BRANCH = process.env.GITHUB_BRANCH || 'main';
 
   if (!GITHUB_TOKEN) {
     return res.status(500).json({ error: 'GITHUB_TOKEN 없음' });
   }
 
   try {
+    const querySha = String(req.query?.headSha || '').trim();
+    const params = new URLSearchParams({ branch: BRANCH, event: 'workflow_dispatch', per_page: '20' });
     const runsRes = await fetch(
-      `https://api.github.com/repos/${REPO}/actions/workflows/court_search.yml/runs?per_page=1`,
+      `https://api.github.com/repos/${REPO}/actions/workflows/court_search.yml/runs?${params}`,
       {
         headers: {
           Authorization: `token ${GITHUB_TOKEN}`,
@@ -27,10 +31,18 @@ export default async function handler(req, res) {
     }
 
     const data = await runsRes.json();
-    const run = data.workflow_runs?.[0];
+    const runs = data.workflow_runs || [];
+    const run = querySha
+      ? runs.find((candidate) => candidate.head_sha === querySha)
+      : runs[0];
 
     if (!run) {
-      return res.status(200).json({ status: 'none', message: '실행 이력 없음' });
+      return res.status(200).json({
+        status: querySha ? 'waiting' : 'none',
+        conclusion: null,
+        headSha: querySha || null,
+        message: querySha ? 'Actions 실행을 기다리는 중' : '실행 이력 없음',
+      });
     }
 
     // status: queued | in_progress | completed
@@ -40,6 +52,7 @@ export default async function handler(req, res) {
       conclusion: run.conclusion,
       runId: run.id,
       runUrl: run.html_url,
+      headSha: run.head_sha,
       startedAt: run.run_started_at,
       updatedAt: run.updated_at,
     });

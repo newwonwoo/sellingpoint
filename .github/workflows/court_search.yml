@@ -10,6 +10,7 @@ on:
           - input.xlsx
           - test_input.xlsx
           - sample_input.xlsx
+          - test_input_user_cases.xlsx
         default: test_input.xlsx
         required: true
       prepare_only:
@@ -55,7 +56,7 @@ jobs:
           INPUT_FILE: ${{ inputs.input_file }}
         run: |
           case "$INPUT_FILE" in
-            input.xlsx|test_input.xlsx|sample_input.xlsx) ;;
+            input.xlsx|test_input.xlsx|sample_input.xlsx|test_input_user_cases.xlsx) ;;
             *) echo "허용되지 않은 입력 파일"; exit 1 ;;
           esac
           if [ ! -f "court-search/$INPUT_FILE" ]; then

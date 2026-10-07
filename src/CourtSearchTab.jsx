@@ -1,12 +1,17 @@
 /**
- * 사건검색 조회 탭
- * - input.xlsx 업로드 → GitHub Actions 트리거 → 상태 폴링 → 결과 다운로드
+ * 대법원 나의사건검색 탭
+ * - 단일 사건: 입력 → Actions 조회 → 캡처 화면과 같은 결과 카드
+ * - 일괄 조회: input.xlsx 업로드 → Actions 조회 → 결과 엑셀 다운로드
  */
 import { useRef, useState, useEffect, useCallback } from "react";
+import * as XLSX from "xlsx-js-style";
+
+const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 
 const STATUS_LABEL = {
   none: "대기",
-  queued: "대기 중…",
+  waiting: "실행 등록 중…",
+  queued: "실행 대기 중…",
   in_progress: "조회 중…",
   completed: "완료",
 };
@@ -15,263 +20,366 @@ const CONCLUSION_LABEL = {
   failure: "❌ 실패",
   cancelled: "⛔ 취소됨",
 };
+const STATUS_MESSAGE = {
+  waiting: "업로드한 사건번호를 GitHub Actions 실행에 등록하고 있습니다.",
+  queued: "실행 대기열에 등록되었습니다. 조회 작업이 시작되기를 기다리고 있습니다.",
+  in_progress: "법원 선택 → 사건번호 입력 → 캡차 처리 → 결과 표 파싱을 진행하고 있습니다.",
+};
+
+const SINGLE_FIELDS = [
+  ["사건번호", "사건번호"],
+  ["사건명", "사건명"],
+  ["재판부", "재판부"],
+  ["접수일", "접수일"],
+  ["종국결과", "종국결과"],
+  ["결정문송달일", "결정문송달일"],
+  ["확정일", "확정일"],
+];
+
+function decodeBase64(base64) {
+  const binary = atob(base64);
+  return Uint8Array.from(binary, (c) => c.charCodeAt(0));
+}
+
+function readResultRow(base64) {
+  const workbook = XLSX.read(decodeBase64(base64), { type: "array" });
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  return XLSX.utils.sheet_to_json(sheet, { defval: "" })[0] || null;
+}
+
+function makeSingleInputFile({ court, caseNo, party }) {
+  const sheet = XLSX.utils.aoa_to_sheet([
+    ["법원", "사건번호", "당사자명"],
+    [court.trim(), caseNo.trim(), party.trim() || "주택"],
+  ]);
+  const workbook = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(workbook, sheet, "입력");
+  const bytes = XLSX.write(workbook, { type: "array", bookType: "xlsx" });
+  return new File([bytes], "single-case-input.xlsx", { type: XLSX_MIME });
+}
+
+function valueOf(row, key) {
+  const value = row?.[key];
+  return value == null || String(value).trim() === "" ? "—" : String(value);
+}
+
+function ProgressTable({ row }) {
+  const items = [1, 2, 3]
+    .map((i) => ({
+      date: row?.[`진행_${i}일자`],
+      content: row?.[`진행_${i}내용`],
+      result: row?.[`진행_${i}결과`],
+      notice: row?.[`진행_${i}공시문`],
+    }))
+    .filter((item) => item.date || item.content || item.result || item.notice);
+  return (
+    <div className="cs-result-section">
+      <div className="cs-result-title">진행내용</div>
+      <div className="cs-result-table-wrap">
+        <table className="cs-result-table">
+          <thead><tr><th>일자</th><th>내용</th><th>결과</th><th>공시문</th></tr></thead>
+          <tbody>
+            {items.length ? items.map((item, i) => (
+              <tr key={`${item.date}-${i}`}>
+                <td>{item.date || "—"}</td>
+                <td className="cs-long-cell">{item.content || "—"}</td>
+                <td>{item.result || "—"}</td>
+                <td>{item.notice || "—"}</td>
+              </tr>
+            )) : <tr><td colSpan="4" className="cs-empty-cell">진행내용이 없습니다.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function SingleResultView({ row }) {
+  if (!row) return null;
+  return (
+    <section className="panel cs-result-panel">
+      <div className="cs-result-heading">조회 결과</div>
+      <div className="cs-result-section">
+        <div className="cs-result-title">기본내용 ({valueOf(row, "법원")})</div>
+        <div className="cs-basic-grid">
+          {SINGLE_FIELDS.map(([label, key]) => (
+            <div className="cs-basic-cell" key={key}>
+              <span>{label}</span><strong>{valueOf(row, key)}</strong>
+            </div>
+          ))}
+        </div>
+      </div>
+      <ProgressTable row={row} />
+      <div className="cs-result-section">
+        <div className="cs-result-title">관련사건내용</div>
+        <div className="cs-result-table-wrap">
+          <table className="cs-result-table"><thead><tr><th>법원</th><th>사건번호</th></tr></thead>
+            <tbody><tr><td>{valueOf(row, "관련사건_법원")}</td><td>{valueOf(row, "관련사건_번호")}</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+      <div className="cs-result-section">
+        <div className="cs-result-title">당사자내용</div>
+        <div className="cs-result-table-wrap">
+          <table className="cs-result-table"><thead><tr><th>구분</th><th>이름</th></tr></thead>
+            <tbody>
+              <tr><td>신청인</td><td>{valueOf(row, "신청인")}</td></tr>
+              <tr><td>피신청인</td><td>{valueOf(row, "피신청인")}</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+  );
+}
 
 export default function CourtSearchTab() {
   const fileRef = useRef(null);
-  const [file, setFile] = useState(null);
-  const [uploading, setUploading] = useState(false);
-  const [runStatus, setRunStatus] = useState(null); // { status, conclusion, runId, startedAt }
-  const [polling, setPolling] = useState(false);
-  const [resultFile, setResultFile] = useState(null); // { filename, content(base64) }
-  const [error, setError] = useState("");
   const pollRef = useRef(null);
+  const headShaRef = useRef("");
+  const [mode, setMode] = useState("single");
+  const [file, setFile] = useState(null);
+  const [singleCase, setSingleCase] = useState({ court: "", caseNo: "", party: "주택" });
+  const [uploading, setUploading] = useState(false);
+  const [runStatus, setRunStatus] = useState(null);
+  const [polling, setPolling] = useState(false);
+  const [resultFile, setResultFile] = useState(null);
+  const [singleResult, setSingleResult] = useState(null);
+  const [error, setError] = useState("");
 
-  // 상태 폴링
-  const checkStatus = useCallback(async () => {
+  const fetchResult = useCallback(async (runId) => {
+    if (!runId) return false;
     try {
-      const res = await fetch("/api/court-search-status");
+      const res = await fetch(`/api/court-search-result?runId=${encodeURIComponent(runId)}`);
       const data = await res.json();
-      setRunStatus(data);
+      if (!res.ok) {
+        setError(data.error || "결과 파일을 불러오지 못했습니다.");
+        return false;
+      }
+      setResultFile(data);
+      setSingleResult(readResultRow(data.content));
+      setError("");
+      return true;
+    } catch (e) {
+      setError(e.message || "결과 파일을 불러오지 못했습니다.");
+      return false;
+    }
+  }, []);
 
+  const checkStatus = useCallback(async (sha = headShaRef.current) => {
+    try {
+      const query = sha ? `?headSha=${encodeURIComponent(sha)}` : "";
+      const res = await fetch(`/api/court-search-status${query}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "실행 상태를 불러오지 못했습니다.");
+      setRunStatus(data);
       if (data.status === "completed") {
         setPolling(false);
         clearInterval(pollRef.current);
-        // 성공이면 결과 파일 자동 조회
-        if (data.conclusion === "success") {
-          await fetchResult();
-        }
+        if (sha && data.conclusion === "success") await fetchResult(data.runId);
       }
-    } catch {
-      // 네트워크 오류는 무시하고 계속 폴링
+    } catch (e) {
+      setError(e.message || "실행 상태를 불러오지 못했습니다.");
     }
-  }, []);
+  }, [fetchResult]);
 
   useEffect(() => {
-    if (polling) {
-      pollRef.current = setInterval(checkStatus, 8000);
-      checkStatus(); // 즉시 1회
-    }
+    if (!polling) return undefined;
+    pollRef.current = setInterval(() => checkStatus(headShaRef.current), 8000);
+    checkStatus(headShaRef.current);
     return () => clearInterval(pollRef.current);
   }, [polling, checkStatus]);
 
-  // 최초 진입 시 현재 상태 1회 확인
   useEffect(() => {
     checkStatus();
-  }, []);
+    return () => clearInterval(pollRef.current);
+  }, [checkStatus]);
 
-  const fetchResult = async () => {
-    try {
-      const res = await fetch("/api/court-search-result");
-      if (res.ok) {
-        const data = await res.json();
-        setResultFile(data);
-      }
-    } catch {
-      // 무시
-    }
-  };
-
-  const handleFileChange = (e) => {
-    const f = e.target.files[0];
-    if (!f) return;
-    if (!f.name.endsWith(".xlsx")) {
-      setError("xlsx 파일만 업로드 가능합니다.");
-      return;
-    }
-    setFile(f);
-    setError("");
-  };
-
-  const handleUploadAndRun = async () => {
-    if (!file) {
-      setError("input.xlsx 파일을 선택하세요.");
+  const startWithFile = async (inputFile) => {
+    if (!inputFile) {
+      setError("조회할 xlsx 파일을 선택하세요.");
       return;
     }
     setError("");
     setUploading(true);
     setResultFile(null);
-
+    setSingleResult(null);
     try {
-      const buffer = await file.arrayBuffer();
       const res = await fetch("/api/court-search-trigger", {
         method: "POST",
         headers: { "Content-Type": "application/octet-stream" },
-        body: buffer,
+        body: await inputFile.arrayBuffer(),
       });
       const data = await res.json();
       if (!res.ok) {
         setError(data.error || "실행 실패");
         return;
       }
-      // 폴링 시작
+      if (!data.headSha) {
+        setError("Actions 실행 식별자를 받지 못했습니다.");
+        return;
+      }
+      headShaRef.current = data.headSha;
+      setRunStatus({ status: "waiting", conclusion: null, headSha: data.headSha, queuedAt: data.queuedAt });
       setPolling(true);
     } catch (e) {
-      setError(e.message);
+      setError(e.message || "실행 실패");
     } finally {
       setUploading(false);
     }
   };
 
+  const handleFileChange = (e) => {
+    const selected = e.target.files?.[0];
+    if (!selected) return;
+    if (!selected.name.toLowerCase().endsWith(".xlsx")) {
+      setError("xlsx 파일만 업로드 가능합니다.");
+      return;
+    }
+    setFile(selected);
+    setError("");
+  };
+
+  const handleSingleRun = () => {
+    if (!singleCase.court.trim() || !singleCase.caseNo.trim()) {
+      setError("법원과 사건번호를 입력하세요.");
+      return;
+    }
+    startWithFile(makeSingleInputFile(singleCase));
+  };
+
   const handleDownload = () => {
     if (!resultFile) return;
-    const bytes = Uint8Array.from(atob(resultFile.content), (c) => c.charCodeAt(0));
-    const blob = new Blob([bytes], {
-      type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-    });
+    const blob = new Blob([decodeBase64(resultFile.content)], { type: XLSX_MIME });
     const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = resultFile.filename;
-    a.click();
-    URL.revokeObjectURL(url);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = resultFile.filename;
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
 
   const handleDownloadTemplate = () => {
-    // input.xlsx 템플릿 다운로드 (GitHub raw)
-    window.open(
-      "https://raw.githubusercontent.com/newwonwoo/sellingpoint/main/court-search/input.xlsx",
-      "_blank"
-    );
+    window.open("https://raw.githubusercontent.com/newwonwoo/sellingpoint/main/court-search/template.xlsx", "_blank");
   };
 
-  const isRunning =
-    runStatus?.status === "queued" || runStatus?.status === "in_progress";
+  const handleDownloadUserSamples = () => {
+    window.open("https://raw.githubusercontent.com/newwonwoo/sellingpoint/main/court-search/test_input_user_cases.xlsx", "_blank");
+  };
+
+  const isRunning = ["waiting", "queued", "in_progress"].includes(runStatus?.status);
+  const statusMessage = runStatus?.status === "completed"
+    ? (runStatus.conclusion === "success" ? "조회가 끝났습니다. 아래 결과 화면과 엑셀을 확인하세요." : "조회가 끝나지 않았습니다. GitHub 로그에서 실패 원인을 확인하세요.")
+    : STATUS_MESSAGE[runStatus?.status] || "";
 
   return (
     <div className="court-search-tab">
-      <div className="section-div">대법원 나의사건검색 일괄조회</div>
+      <div className="section-div">대법원 나의사건검색</div>
+      <div className="cs-mode-tabs" role="tablist" aria-label="조회 방식">
+        <button className={mode === "single" ? "on" : ""} onClick={() => setMode("single")} role="tab" aria-selected={mode === "single"}>단일 사건 조회</button>
+        <button className={mode === "batch" ? "on" : ""} onClick={() => setMode("batch")} role="tab" aria-selected={mode === "batch"}>엑셀 일괄조회</button>
+      </div>
 
-      {/* Step 1: 파일 업로드 */}
-      <section className="panel controls">
-        <div className="cs-step">
-          <span className="cs-badge">1</span>
-          <span className="cs-label">input.xlsx 준비</span>
-          <button className="cs-link" onClick={handleDownloadTemplate}>
-            양식 다운로드
-          </button>
-        </div>
-        <p className="cs-hint">
-          법원명(서울중앙지방법원 등)과 사건번호(2025타인12345 형식)를 A·B열에 입력하세요.
-        </p>
-      </section>
+      {mode === "single" ? (
+        <section className="panel controls">
+          <div className="cs-step"><span className="cs-badge">1</span><span className="cs-label">사건번호 입력</span></div>
+          <div className="cs-single-grid">
+            <label><span>법원</span><input value={singleCase.court} placeholder="예: 서울남부지방법원" onChange={(e) => setSingleCase((v) => ({ ...v, court: e.target.value }))} /></label>
+            <label><span>사건번호</span><input value={singleCase.caseNo} placeholder="예: 2026타인3944" onChange={(e) => setSingleCase((v) => ({ ...v, caseNo: e.target.value }))} /></label>
+            <label><span>당사자명</span><input value={singleCase.party} placeholder="예: 주택" onChange={(e) => setSingleCase((v) => ({ ...v, party: e.target.value }))} /></label>
+          </div>
+          <div className="cs-upload-row cs-single-actions">
+            <button className="go" onClick={handleSingleRun} disabled={uploading || isRunning}>{uploading ? "등록 중…" : isRunning ? "조회 중…" : "조회 시작"}</button>
+            <span className="cs-hint">결과는 캡처 화면과 같은 기본내용·진행내용·관련사건·당사자 영역으로 표시됩니다.</span>
+          </div>
+        </section>
+      ) : (
+        <>
+          <section className="panel controls">
+            <div className="cs-step"><span className="cs-badge">1</span><span className="cs-label">input.xlsx 준비</span><button className="cs-link" onClick={handleDownloadTemplate}>양식 다운로드</button><button className="cs-link" onClick={handleDownloadUserSamples}>사용자 테스트 파일</button></div>
+            <p className="cs-hint">법원명·사건번호·당사자명을 입력한 xlsx를 올리세요. 테스트 파일에는 지금까지 전달한 사건번호가 들어 있습니다.</p>
+          </section>
+          <section className="panel controls">
+            <div className="cs-step"><span className="cs-badge">2</span><span className="cs-label">파일 업로드 후 조회 시작</span></div>
+            <div className="cs-upload-row">
+              <input ref={fileRef} type="file" accept=".xlsx" style={{ display: "none" }} onChange={handleFileChange} />
+              <button className="cs-upload-btn" onClick={() => fileRef.current?.click()} disabled={uploading || isRunning}>{file ? `📄 ${file.name}` : "파일 선택"}</button>
+              <button className="go" onClick={() => startWithFile(file)} disabled={!file || uploading || isRunning}>{uploading ? "업로드 중…" : isRunning ? "조회 중…" : "조회 시작"}</button>
+            </div>
+          </section>
+        </>
+      )}
 
-      <section className="panel controls">
-        <div className="cs-step">
-          <span className="cs-badge">2</span>
-          <span className="cs-label">파일 업로드 후 조회 시작</span>
-        </div>
-        <div className="cs-upload-row">
-          <input
-            ref={fileRef}
-            type="file"
-            accept=".xlsx"
-            style={{ display: "none" }}
-            onChange={handleFileChange}
-          />
-          <button
-            className="cs-upload-btn"
-            onClick={() => fileRef.current?.click()}
-            disabled={uploading || isRunning}
-          >
-            {file ? `📄 ${file.name}` : "파일 선택"}
-          </button>
-          <button
-            className="go"
-            onClick={handleUploadAndRun}
-            disabled={!file || uploading || isRunning}
-          >
-            {uploading ? "업로드 중…" : isRunning ? "조회 중…" : "조회 시작"}
-          </button>
-        </div>
-        {error && <div className="status err">{error}</div>}
-      </section>
+      {error && <div className="status err">{error}</div>}
 
-      {/* Step 3: 실행 상태 */}
       {runStatus && runStatus.status !== "none" && (
         <section className="panel">
-          <div className="cs-step">
-            <span className="cs-badge">3</span>
-            <span className="cs-label">실행 상태</span>
-          </div>
+          <div className="cs-step"><span className="cs-badge">2</span><span className="cs-label">진행 상태</span></div>
           <div className="cs-status-row">
             <span className={`badge ${runStatus.status === "completed" ? (runStatus.conclusion === "success" ? "ok" : "warn") : "info"}`}>
-              {runStatus.status === "completed"
-                ? CONCLUSION_LABEL[runStatus.conclusion] || runStatus.conclusion
-                : STATUS_LABEL[runStatus.status] || runStatus.status}
+              {runStatus.status === "completed" ? CONCLUSION_LABEL[runStatus.conclusion] || runStatus.conclusion : STATUS_LABEL[runStatus.status] || runStatus.status}
             </span>
-            {runStatus.startedAt && (
-              <span className="cs-time">
-                시작: {new Date(runStatus.startedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}
-              </span>
-            )}
-            {runStatus.runUrl && (
-              <a className="cs-link" href={runStatus.runUrl} target="_blank" rel="noreferrer">
-                GitHub 로그 보기 →
-              </a>
-            )}
+            {(runStatus.startedAt || runStatus.queuedAt) && <span className="cs-time">시작: {new Date(runStatus.startedAt || runStatus.queuedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}</span>}
+            {runStatus.runUrl && <a className="cs-link" href={runStatus.runUrl} target="_blank" rel="noreferrer">GitHub 로그 보기 →</a>}
           </div>
-          {isRunning && (
-            <div className="cs-progress">
-              <div className="cs-spinner" />
-              <span>자동 조회 진행 중… (최대 30분 소요)</span>
-            </div>
-          )}
+          {statusMessage && <div className="cs-stage-message">{statusMessage}</div>}
+          {isRunning && <div className="cs-progress"><div className="cs-spinner" /><span>진행 중 — 캡차와 법원 응답을 확인하고 있습니다.</span></div>}
         </section>
       )}
 
-      {/* Step 4: 결과 다운로드 */}
+      {mode === "single" && singleResult && <SingleResultView row={singleResult} />}
+
       {resultFile && (
         <section className="panel">
-          <div className="cs-step">
-            <span className="cs-badge">4</span>
-            <span className="cs-label">결과 다운로드</span>
-          </div>
-          <div className="cs-upload-row">
-            <span className="badge ok">결과 준비 완료</span>
-            <span className="cs-time">{resultFile.filename}</span>
-            <button className="go" onClick={handleDownload}>
-              📥 다운로드
-            </button>
-          </div>
-          <p className="cs-hint">22개 컬럼 · 진행내용 최근 3줄 포함</p>
+          <div className="cs-step"><span className="cs-badge">3</span><span className="cs-label">결과 엑셀</span></div>
+          <div className="cs-upload-row"><span className="badge ok">결과 준비 완료</span><span className="cs-time">{resultFile.filename}</span><button className="go" onClick={handleDownload}>📥 다운로드</button></div>
+          <p className="cs-hint">실제 조회 결과 파일입니다. 단일 사건은 위 화면에서도 같은 내용을 확인할 수 있습니다.</p>
         </section>
       )}
 
-      {/* 이전 결과 조회 버튼 */}
       {!resultFile && runStatus?.status === "completed" && runStatus?.conclusion === "success" && (
-        <section className="panel">
-          <button className="go" onClick={fetchResult}>이전 결과 불러오기</button>
-        </section>
+        <section className="panel"><button className="go" onClick={() => fetchResult(runStatus.runId)}>이전 결과 불러오기</button></section>
       )}
 
       <style>{`
         .court-search-tab { }
-        .cs-step { display: flex; align-items: center; gap: 8px; margin-bottom: 10px; }
-        .cs-badge {
-          display: inline-flex; align-items: center; justify-content: center;
-          width: 22px; height: 22px; border-radius: 50%;
-          background: #1F4E79; color: #fff; font-size: 12px; font-weight: bold; flex-shrink: 0;
-        }
-        .cs-label { font-weight: 600; font-size: 14px; }
-        .cs-link { background: none; border: none; color: #2563eb; cursor: pointer; font-size: 13px; text-decoration: underline; padding: 0; }
-        .cs-hint { font-size: 12px; color: #666; margin: 4px 0 0; }
-        .cs-upload-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-        .cs-upload-btn {
-          padding: 6px 14px; border: 1.5px dashed #999; border-radius: 6px;
-          background: #f8f9fa; cursor: pointer; font-size: 13px;
-          max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-        }
-        .cs-upload-btn:hover { border-color: #1F4E79; }
-        .cs-status-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-        .cs-time { font-size: 12px; color: #666; }
-        .cs-progress { display: flex; align-items: center; gap: 10px; margin-top: 12px; font-size: 13px; color: #444; }
-        .cs-spinner {
-          width: 18px; height: 18px; border: 2px solid #ddd;
-          border-top-color: #1F4E79; border-radius: 50%;
-          animation: spin 0.8s linear infinite;
-        }
-        @keyframes spin { to { transform: rotate(360deg); } }
-        .badge.info { background: #e8f0fe; color: #1a56db; }
+        .cs-mode-tabs { display:flex; gap:8px; margin:0 0 14px; }
+        .cs-mode-tabs button { padding:8px 14px; border:1px solid #cbd5e1; border-radius:7px; background:#fff; cursor:pointer; color:#475569; }
+        .cs-mode-tabs button.on { background:#1F4E79; color:#fff; border-color:#1F4E79; }
+        .cs-step { display:flex; align-items:center; gap:8px; margin-bottom:10px; flex-wrap:wrap; }
+        .cs-badge { display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; border-radius:50%; background:#1F4E79; color:#fff; font-size:12px; font-weight:bold; flex-shrink:0; }
+        .cs-label { font-weight:600; font-size:14px; }
+        .cs-link { background:none; border:none; color:#2563eb; cursor:pointer; font-size:13px; text-decoration:underline; padding:0; }
+        .cs-hint { font-size:12px; color:#666; margin:4px 0 0; }
+        .cs-single-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+        .cs-single-grid label { display:flex; flex-direction:column; gap:5px; font-size:12px; color:#475569; }
+        .cs-single-grid input { min-height:36px; border:1px solid #cbd5e1; border-radius:6px; padding:0 10px; font:inherit; color:#111827; }
+        .cs-single-actions { margin-top:12px; }
+        .cs-upload-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+        .cs-upload-btn { padding:6px 14px; border:1.5px dashed #999; border-radius:6px; background:#f8f9fa; cursor:pointer; font-size:13px; max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+        .cs-upload-btn:hover { border-color:#1F4E79; }
+        .cs-status-row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+        .cs-time { font-size:12px; color:#666; }
+        .cs-stage-message { margin-top:10px; color:#1e3a5f; font-size:13px; }
+        .cs-progress { display:flex; align-items:center; gap:10px; margin-top:10px; font-size:13px; color:#444; }
+        .cs-spinner { width:18px; height:18px; border:2px solid #ddd; border-top-color:#1F4E79; border-radius:50%; animation:spin .8s linear infinite; }
+        @keyframes spin { to { transform:rotate(360deg); } }
+        .badge.info { background:#e8f0fe; color:#1a56db; }
+        .cs-result-panel { border-top:3px solid #1F4E79; }
+        .cs-result-heading { font-size:17px; font-weight:700; margin-bottom:14px; color:#1f2937; }
+        .cs-result-section { margin-top:16px; }
+        .cs-result-title { border-bottom:2px solid #1f2937; padding:0 0 7px; font-size:14px; font-weight:700; color:#1f2937; }
+        .cs-basic-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); border-top:1px solid #d8dee8; }
+        .cs-basic-cell { display:grid; grid-template-columns:110px minmax(0,1fr); min-height:36px; border-bottom:1px solid #e5e7eb; }
+        .cs-basic-cell span { background:#f3f4f6; padding:9px 8px; font-size:12px; color:#475569; }
+        .cs-basic-cell strong { padding:9px 8px; font-size:13px; font-weight:500; overflow-wrap:anywhere; }
+        .cs-result-table-wrap { overflow:auto; }
+        .cs-result-table { width:100%; border-collapse:collapse; font-size:12px; }
+        .cs-result-table th, .cs-result-table td { border:1px solid #d8dee8; padding:8px; text-align:left; vertical-align:top; }
+        .cs-result-table th { background:#f3f4f6; font-weight:600; white-space:nowrap; }
+        .cs-long-cell { min-width:260px; }
+        .cs-empty-cell { text-align:center !important; color:#64748b; }
+        @media (max-width:700px) { .cs-single-grid, .cs-basic-grid { grid-template-columns:1fr; } .cs-basic-cell { grid-template-columns:100px minmax(0,1fr); } }
       `}</style>
     </div>
   );

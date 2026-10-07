@@ -35,9 +35,9 @@ OUTPUT_FILE = os.path.join(BASE_DIR, 'output.xlsx')
 OUTPUT_HEADERS = [
     '법원', '사건번호', '사건명', '재판부',
     '접수일', '종국결과', '결정문송달일', '확정일',
-    '진행_1일자', '진행_1내용', '진행_1결과',
-    '진행_2일자', '진행_2내용', '진행_2결과',
-    '진행_3일자', '진행_3내용', '진행_3결과',
+    '진행_1일자', '진행_1내용', '진행_1결과', '진행_1공시문',
+    '진행_2일자', '진행_2내용', '진행_2결과', '진행_2공시문',
+    '진행_3일자', '진행_3내용', '진행_3결과', '진행_3공시문',
     '관련사건_법원', '관련사건_번호',
     '신청인', '피신청인', '조회일시',
 ]
@@ -311,11 +311,12 @@ async def parse_result(page: Page, court: str, case_no: str) -> dict:
     if progress:
         for row in progress['rows']:
             if len(row) >= 2 and re.match(r'\d{4}[.\-]\d{2}[.\-]\d{2}', row[0]):
-                collected.append((row[0], row[1], row[2] if len(row) > 2 else ''))
-    for slot, (date, content, result) in enumerate(collected[-3:][::-1], 1):
+                collected.append((row[0], row[1], row[2] if len(row) > 2 else '', row[3] if len(row) > 3 else ''))
+    for slot, (date, content, result, notice) in enumerate(collected[-3:][::-1], 1):
         data[f'진행_{slot}일자'] = date
         data[f'진행_{slot}내용'] = content
         data[f'진행_{slot}결과'] = result
+        data[f'진행_{slot}공시문'] = notice
 
     related = next((t for t in tables if '법원' in t['text'] and '사건번호' in t['text']
                     and '구분' in t['text']), None)
@@ -523,11 +524,11 @@ def write_output(results: list[dict], path: str):
     col_widths = {
         1: 20, 2: 16, 3: 24, 4: 20,
         5: 12, 6: 20, 7: 14, 8: 12,
-        9: 12, 10: 30, 11: 20,
-        12: 12, 13: 30, 14: 20,
-        15: 12, 16: 30, 17: 20,
-        18: 18, 19: 16,
-        20: 24, 21: 24, 22: 18,
+        9: 12, 10: 30, 11: 20, 12: 16,
+        13: 12, 14: 30, 15: 20, 16: 16,
+        17: 12, 18: 30, 19: 20, 20: 16,
+        21: 18, 22: 16,
+        23: 24, 24: 24, 25: 18,
     }
     for col, width in col_widths.items():
         ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = width

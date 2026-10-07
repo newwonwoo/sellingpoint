@@ -1,21 +1,26 @@
 /**
  * GET /api/court-search-result
- * results/ 폴더의 최신 xlsx 파일을 base64로 반환
+ * 지정한 GitHub Actions 실행의 artifact에서 output.xlsx를 꺼내 base64로 반환
  */
+
+import JSZip from 'jszip';
 
 export default async function handler(req, res) {
   const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-  const REPO = 'newwonwoo/sellingpoint';
-  const BRANCH = 'main';
+  const REPO = process.env.GITHUB_REPO || 'newwonwoo/sellingpoint';
 
   if (!GITHUB_TOKEN) {
     return res.status(500).json({ error: 'GITHUB_TOKEN 없음' });
   }
 
   try {
-    // results/ 폴더 목록 조회
+    const runId = String(req.query?.runId || '').trim();
+    if (!/^\d+$/.test(runId)) {
+      return res.status(400).json({ error: '결과를 받을 runId가 필요합니다.' });
+    }
+
     const listRes = await fetch(
-      `https://api.github.com/repos/${REPO}/contents/court-search/results?ref=${BRANCH}`,
+      `https://api.github.com/repos/${REPO}/actions/runs/${runId}/artifacts?per_page=100`,
       {
         headers: {
           Authorization: `token ${GITHUB_TOKEN}`,
@@ -25,34 +30,41 @@ export default async function handler(req, res) {
     );
 
     if (!listRes.ok) {
-      return res.status(404).json({ error: '결과 폴더 없음' });
+      return res.status(502).json({ error: `Actions artifact 목록 조회 실패 (${listRes.status})` });
     }
 
-    const files = await listRes.json();
-    // .xlsx 파일만 필터, 최신순 정렬
-    const xlsxFiles = files
-      .filter(f => f.name.endsWith('.xlsx'))
-      .sort((a, b) => b.name.localeCompare(a.name));
-
-    if (xlsxFiles.length === 0) {
-      return res.status(404).json({ error: '결과 파일 없음' });
+    const artifacts = (await listRes.json()).artifacts || [];
+    const artifact = artifacts.find((item) => item.name === 'court-search-result' && !item.expired);
+    if (!artifact) {
+      return res.status(404).json({ error: '이 실행의 결과 artifact가 아직 없습니다.' });
     }
 
-    const latest = xlsxFiles[0];
-
-    // 파일 내용 조회 (base64)
-    const fileRes = await fetch(latest.download_url);
+    // artifact API는 zip을 반환한다. 결과 파일과 진단 파일이 함께 있을 수 있다.
+    const fileRes = await fetch(artifact.archive_download_url, {
+      headers: {
+        Authorization: `token ${GITHUB_TOKEN}`,
+        Accept: 'application/vnd.github+json',
+      },
+    });
     if (!fileRes.ok) {
-      return res.status(500).json({ error: '파일 다운로드 실패' });
+      return res.status(502).json({ error: `artifact 다운로드 실패 (${fileRes.status})` });
     }
 
-    const buffer = await fileRes.arrayBuffer();
-    const base64 = Buffer.from(buffer).toString('base64');
+    const zip = await JSZip.loadAsync(await fileRes.arrayBuffer());
+    const outputName = Object.keys(zip.files).find((name) =>
+      !zip.files[name].dir && (name === 'output.xlsx' || name.endsWith('/output.xlsx'))
+    );
+    if (!outputName) {
+      return res.status(404).json({ error: 'artifact 안에 output.xlsx가 없습니다.' });
+    }
+    const base64 = await zip.files[outputName].async('base64');
 
+    res.setHeader('Cache-Control', 'no-store');
     return res.status(200).json({
-      filename: latest.name,
+      filename: `court-search-${runId}.xlsx`,
       content: base64,
-      size: latest.size,
+      size: Buffer.byteLength(base64, 'base64'),
+      runId,
     });
 
   } catch (e) {
