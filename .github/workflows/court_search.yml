@@ -41,6 +41,11 @@ jobs:
           fi
           echo "✅ input.xlsx 확인"
 
+      - name: "[진단] 사이트 select 옵션 수집"
+        run: |
+          cd court-search
+          python dump_selects.py || true
+
       - name: 사건검색 실행
         run: |
           cd court-search
