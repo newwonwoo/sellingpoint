@@ -1,7 +1,7 @@
 """
 대법원 나의사건검색 자동조회 스크립트
 - 대상: https://ssgo.scourt.go.kr/ssgo/index.on?cortId=www (신규 WebSquare 기반)
-- input.xlsx: 법원, 사건번호 → output.xlsx: 22개 칼럼 결과
+- input.xlsx: 법원, 사건번호 → output.xlsx: 25개 칼럼 결과
 - 캡차: blob URL → 요소 screenshot → EasyOCR (숫자 6자리)
 - 최대 20회 캡차 재시도
 """
@@ -385,19 +385,29 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
     print(f"  조회: {court} / {case_no}")
 
     year, case_type, serial = parse_case_no(case_no)
+    page_ready = False
+    stage = '사이트 접속'
+    failure_reason = '재시도 한도 초과'
 
     for attempt in range(1, (1 if prepare_only else MAX_CAPTCHA_RETRY) + 1):
         try:
-            # 페이지 이동 (첫 시도만 full load, 이후는 캡차 새로고침만)
-            if attempt == 1:
+            # 페이지 이동. 캡차 불일치 재시도는 현재 화면을 유지하지만,
+            # 접속/렌더링 오류 뒤에는 빈 페이지를 재사용하지 않는다.
+            if attempt == 1 or not page_ready:
+                stage = '사이트 접속'
+                print(f"  단계 {stage} (시도 {attempt})")
                 await page.goto(TARGET_URL, wait_until='domcontentloaded', timeout=40000)
                 # WebSquare 초기화 대기
                 await page.wait_for_selector(SEL_COURT, timeout=15000)
+                page_ready = True
 
             # ── 법원 선택 ──
+            stage = '법원 선택'
+            print(f"  단계 {stage}")
             await select_court(page, court)
 
             # ── 연도 ──
+            stage = '사건번호 입력'
             await ws_select(page, SEL_YEAR, year)
 
             # ── 사건구분 ──
@@ -412,7 +422,7 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
             await page.fill(SEL_PARTY, party_name)
 
             if prepare_only:
-                print("  입력값 확인 완료 — 검색 제출 생략")
+                print("  ✅ 입력값 확인 완료 — 검색 제출 생략")
                 return {h: '' for h in OUTPUT_HEADERS} | {
                     '법원': court, '사건번호': case_no,
                     '사건명': '입력점검 완료',
@@ -420,6 +430,7 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
                 }
 
             # ── 캡차 ──
+            stage = '캡차 인식'
             if attempt > 1:
                 # 캡차 새로고침 버튼 클릭
                 reload_btn = page.locator(SEL_CAPTCHA_RELOAD)
@@ -438,6 +449,7 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
             await page.fill(SEL_CAPTCHA_INPUT, captcha_answer)
 
             # ── 검색 ──
+            stage = '검색 제출'
             page._last_dialog_message = ''
             await page.click(SEL_SEARCH)
 
@@ -449,6 +461,7 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
                 print("  캡차 불일치 → 새 캡차로 재시도")
                 continue
             if not await wait_for_result_page(page):
+                stage = '결과 화면 대기'
                 content = await page.content()
                 if any(k in content for k in ['인증번호가 일치하지', '자동입력방지문자가 틀', '자동 입력 방지 문자가 틀']):
                     print("  캡차 불일치 → 재시도")
@@ -470,33 +483,51 @@ async def search_one(page: Page, court: str, case_no: str, party_name: str = '�
                 }
 
             # 성공 → 결과 파싱
+            stage = '결과 파싱'
             result = await parse_result(page, court, case_no)
             if not result.get('사건명'):
                 await save_result_debug(page, case_no)
                 result['사건명'] = '조회실패: 결과 파싱 실패'
                 print("  결과 화면은 열렸지만 사건명 추출에 실패")
+            else:
+                print(f"  ✅ 결과 파싱 완료: 사건명={result['사건명']}")
             return result
 
         except ValueError as e:
             print(f"  입력 오류: {e}")
             break
-        except PlaywrightTimeout:
-            print(f"  타임아웃 (시도 {attempt}) — 페이지 재로드")
+        except PlaywrightTimeout as e:
+            page_ready = False
+            detail = str(e).replace('\n', ' ')[:180]
+            if 'Page.goto' in detail or 'navigating to' in detail:
+                failure_reason = '법원 사이트 연결 실패'
+                print(f"  ❌ 접속 시간 초과: {TARGET_URL} (단계: {stage}, 시도 {attempt})")
+                print("  안내: 법원 사이트가 응답하지 않아 잠시 후 새 연결로 재시도합니다.")
+            else:
+                failure_reason = f'{stage} 단계 시간 초과'
+                print(f"  ❌ {stage} 단계 시간 초과 (시도 {attempt}): {detail}")
             if prepare_only:
                 break
             try:
-                await page.goto(TARGET_URL, wait_until='networkidle', timeout=40000)
-                await page.wait_for_selector(SEL_COURT, timeout=15000)
+                await page.wait_for_timeout(min(3000 * attempt, 15000))
             except Exception:
                 pass
             continue
         except Exception as e:
-            print(f"  오류 (시도 {attempt}): {e}")
+            page_ready = False if any(token in str(e) for token in ('ERR_CONNECTION', 'net::', 'Target closed')) else page_ready
+            detail = str(e).replace('\n', ' ')[:220]
+            if any(token in detail for token in ('ERR_CONNECTION', 'net::', 'Connection timed out')):
+                failure_reason = '법원 사이트 연결 실패'
+                print(f"  ❌ 법원 사이트 연결 실패 (단계: {stage}, 시도 {attempt}): {detail}")
+            else:
+                failure_reason = f'{stage} 단계 오류'
+                print(f"  ❌ {stage} 단계 오류 (시도 {attempt}): {detail}")
             continue
 
     return {h: '' for h in OUTPUT_HEADERS} | {
         '법원': court, '사건번호': case_no,
-        '사건명': '조회실패', '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        '사건명': f'조회실패: {failure_reason}',
+        '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     }
 
 

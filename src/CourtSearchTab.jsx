@@ -270,7 +270,7 @@ export default function CourtSearchTab() {
   const isRunning = ["waiting", "queued", "in_progress"].includes(runStatus?.status);
   const statusMessage = runStatus?.status === "completed"
     ? (runStatus.conclusion === "success" ? "조회가 끝났습니다. 아래 결과 화면과 엑셀을 확인하세요." : "조회가 끝나지 않았습니다. GitHub 로그에서 실패 원인을 확인하세요.")
-    : STATUS_MESSAGE[runStatus?.status] || "";
+    : runStatus?.stageMessage || runStatus?.message || STATUS_MESSAGE[runStatus?.status] || "";
 
   return (
     <div className="court-search-tab">
@@ -320,6 +320,7 @@ export default function CourtSearchTab() {
               {runStatus.status === "completed" ? CONCLUSION_LABEL[runStatus.conclusion] || runStatus.conclusion : STATUS_LABEL[runStatus.status] || runStatus.status}
             </span>
             {(runStatus.startedAt || runStatus.queuedAt) && <span className="cs-time">시작: {new Date(runStatus.startedAt || runStatus.queuedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}</span>}
+            {runStatus.currentStep && <span className="cs-time">현재 단계: {runStatus.currentStep}</span>}
             {runStatus.runUrl && <a className="cs-link" href={runStatus.runUrl} target="_blank" rel="noreferrer">GitHub 로그 보기 →</a>}
           </div>
           {statusMessage && <div className="cs-stage-message">{statusMessage}</div>}
