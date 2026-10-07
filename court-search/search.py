@@ -25,8 +25,10 @@ from captcha_solver import predict_captcha
 # 설정
 # ──────────────────────────────────────────────
 TARGET_URL = 'https://ssgo.scourt.go.kr/ssgo/index.on?cortId=www'
-MAX_CAPTCHA_RETRY = 20
-# 접속 자체가 되지 않는 경우에는 캡차 재시도와 분리한다. 법원 사이트가
+# 캡차가 계속 틀릴 때 한 사건이 지나치게 오래 붙잡히지 않도록 제한한다.
+# 정상 환경의 실제 단건 실행은 첫 시도에 통과했다.
+MAX_CAPTCHA_RETRY = 5
+    # 접속 자체가 되지 않는 경우에는 캡차 재시도와 분리한다. 법원 사이트가
 # 내려가 있거나 러너에서 연결이 막힌 상태로 20회까지 기다리면 한 건도
 # 오래 멈추므로, 짧게 재시도한 뒤 해당 사건을 실패 처리한다.
 MAX_CONNECTION_RETRY = 3
