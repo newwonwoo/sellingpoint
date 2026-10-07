@@ -150,12 +150,25 @@ def parse_case_no(case_no: str):
 # 신규 사이트 캡차 처리 (blob URL → 요소 screenshot)
 # ──────────────────────────────────────────────
 async def get_captcha_answer(page: Page) -> str | None:
-    """캡차 img 요소를 직접 screenshot해서 ML 예측"""
+    """캡차 요소를 우선 읽고, 실패하면 렌더링 화면 영역을 저배율로 재캡처한다."""
     try:
         captcha_el = page.locator(SEL_CAPTCHA_IMG)
         await captcha_el.wait_for(timeout=5000)
-        img_bytes = await captcha_el.screenshot()
-        return predict_captcha(img_bytes)
+        img_bytes = await captcha_el.screenshot(animations='disabled')
+        answer = predict_captcha(img_bytes)
+        if answer:
+            return answer
+
+        # 일부 WebSquare 화면은 img 요소 캡처와 실제 표시 화면의 픽셀이
+        # 다르게 합성된다. 이때 CSS 배율의 화면 캡처를 OCR에 재시도한다.
+        box = await captcha_el.bounding_box()
+        if box:
+            rendered_bytes = await page.screenshot(clip=box, scale='css')
+            answer = predict_captcha(rendered_bytes)
+            if answer:
+                print('  캡차 화면 캡처 보조 인식 성공')
+            return answer
+        return None
     except Exception as e:
         print(f"  캡차 이미지 캡처 실패: {e}")
         return None
