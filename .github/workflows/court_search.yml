@@ -85,7 +85,7 @@ jobs:
           PREPARE_ONLY: ${{ inputs.prepare_only }}
         run: |
           if [ "$PREPARE_ONLY" = "true" ]; then
-            pip install playwright==1.49.0 openpyxl==3.1.5 Pillow==11.0.0
+            pip install playwright==1.49.0 openpyxl==3.1.5 Pillow==11.0.0 numpy==2.1.3
           else
             pip install -r court-search/requirements.txt
           fi
