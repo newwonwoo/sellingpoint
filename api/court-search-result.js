@@ -67,16 +67,25 @@ export default async function handler(req, res) {
       return res.status(404).json({ error: 'artifact 안에 결과 엑셀 파일이 없습니다.' });
     }
     const base64 = await zip.files[outputName].async('base64');
+    const output = Buffer.from(base64, 'base64');
     const range = artifact.name.match(/^court-search-partial-(\d+)-(\d+)$/);
     const filename = range
       ? `court-search-${String(Number(range[1])).padStart(4, '0')}-${String(Number(range[2])).padStart(4, '0')}.xlsx`
       : `court-search-${runId}.xlsx`;
 
+    if (String(req.query?.download || '') === '1') {
+      res.setHeader('Cache-Control', 'no-store');
+      res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.setHeader('Content-Length', String(output.length));
+      return res.status(200).send(output);
+    }
+
     res.setHeader('Cache-Control', 'no-store');
     return res.status(200).json({
       filename,
       content: base64,
-      size: Buffer.byteLength(base64, 'base64'),
+      size: output.length,
       runId,
       artifactId: artifactId || null,
     });

@@ -7,6 +7,7 @@ import { useRef, useState, useEffect, useCallback } from "react";
 import * as XLSX from "xlsx-js-style";
 
 const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+const ACTIVE_RUN_STORAGE_KEY = "sellingpoint:court-search-active-run";
 
 const STATUS_LABEL = {
   none: "대기",
@@ -62,6 +63,23 @@ function downloadBase64File(file) {
   anchor.download = file.filename;
   anchor.click();
   setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function readSavedRun() {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(ACTIVE_RUN_STORAGE_KEY) || "null");
+    return value?.headSha ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+function saveRun(value) {
+  try {
+    window.localStorage.setItem(ACTIVE_RUN_STORAGE_KEY, JSON.stringify(value));
+  } catch {
+    // 저장소 사용이 막힌 브라우저에서도 현재 탭의 조회는 계속 진행한다.
+  }
 }
 
 function makeSingleInputFile({ court, caseNo, party }) {
@@ -166,6 +184,34 @@ export default function CourtSearchTab() {
   const [partialDownloading, setPartialDownloading] = useState("");
   const [error, setError] = useState("");
 
+  const downloadResult = useCallback(async (runId, artifactId = "") => {
+    if (!runId) return false;
+    const params = new URLSearchParams({ runId: String(runId), download: "1" });
+    if (artifactId) params.set("artifactId", String(artifactId));
+    try {
+      const res = await fetch(`/api/court-search-result?${params}`);
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || "결과 파일을 불러오지 못했습니다.");
+      }
+      const blob = await res.blob();
+      const disposition = res.headers.get("content-disposition") || "";
+      const matched = disposition.match(/filename="([^"]+)"/);
+      const filename = matched?.[1] || `court-search-${runId}.xlsx`;
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = filename;
+      anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      setError("");
+      return true;
+    } catch (e) {
+      setError(e.message || "결과 파일을 불러오지 못했습니다.");
+      return false;
+    }
+  }, []);
+
   const fetchResult = useCallback(async (runId) => {
     if (!runId) return false;
     try {
@@ -192,6 +238,13 @@ export default function CourtSearchTab() {
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "실행 상태를 불러오지 못했습니다.");
       setRunStatus(data);
+      if (sha && data.runId) {
+        saveRun({
+          ...readSavedRun(),
+          headSha: sha,
+          runId: data.runId,
+        });
+      }
       if (data.status === "completed") {
         setPolling(false);
         clearInterval(pollRef.current);
@@ -210,9 +263,20 @@ export default function CourtSearchTab() {
   }, [polling, checkStatus]);
 
   useEffect(() => {
-    checkStatus();
+    const saved = readSavedRun();
+    if (saved?.headSha) {
+      headShaRef.current = saved.headSha;
+      if (saved.expectedTotal) setExpectedTotal(saved.expectedTotal);
+      if (saved.mode === "single" || saved.mode === "batch") setMode(saved.mode);
+      setPolling(true);
+      checkStatus(saved.headSha);
+    } else {
+      checkStatus();
+    }
     return () => clearInterval(pollRef.current);
-  }, [checkStatus]);
+    // 최초 진입 때만 브라우저에 저장된 마지막 실행을 복구한다.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const startWithFile = async (inputFile) => {
     if (!inputFile) {
@@ -246,6 +310,7 @@ export default function CourtSearchTab() {
         return;
       }
       headShaRef.current = data.headSha;
+      saveRun({ headSha: data.headSha, expectedTotal: total, mode });
       setRunStatus({ status: "waiting", conclusion: null, headSha: data.headSha, queuedAt: data.queuedAt });
       setPolling(true);
     } catch (e) {
@@ -275,23 +340,15 @@ export default function CourtSearchTab() {
   };
 
   const handleDownload = () => {
-    if (!resultFile) return;
-    downloadBase64File(resultFile);
+    if (resultFile) downloadBase64File(resultFile);
+    else if (runStatus?.runId) downloadResult(runStatus.runId);
   };
 
   const handlePartialDownload = async (partial) => {
     if (!runStatus?.runId || !partial?.artifactId) return;
     setPartialDownloading(partial.artifactId);
     try {
-      const params = new URLSearchParams({
-        runId: String(runStatus.runId),
-        artifactId: String(partial.artifactId),
-      });
-      const res = await fetch(`/api/court-search-result?${params}`);
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || "중간 결과를 불러오지 못했습니다.");
-      downloadBase64File(data);
-      setError("");
+      await downloadResult(runStatus.runId, partial.artifactId);
     } catch (e) {
       setError(e.message || "중간 결과를 불러오지 못했습니다.");
     } finally {
@@ -402,7 +459,14 @@ export default function CourtSearchTab() {
       )}
 
       {!resultFile && runStatus?.status === "completed" && runStatus?.conclusion === "success" && (
-        <section className="panel"><button className="go" onClick={() => fetchResult(runStatus.runId)}>이전 결과 불러오기</button></section>
+        <section className="panel">
+          <div className="cs-step"><span className="cs-badge">3</span><span className="cs-label">결과 엑셀</span></div>
+          <div className="cs-upload-row">
+            <span className="badge ok">결과 준비 완료</span>
+            <button className="go" onClick={() => downloadResult(runStatus.runId)}>📥 전체 결과 다운로드</button>
+            {mode === "single" && <button className="cs-link" onClick={() => fetchResult(runStatus.runId)}>화면 결과 다시 불러오기</button>}
+          </div>
+        </section>
       )}
 
       <style>{`
