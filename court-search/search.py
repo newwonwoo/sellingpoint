@@ -457,6 +457,32 @@ async def restore_search_form(page: Page) -> bool:
     except Exception:
         pass
 
+    # WebSquare 버튼은 input/button/a 중 어느 형태로도 렌더링될 수 있고
+    # value·title·textContent 중 하나에만 문구가 들어가는 경우가 있다.
+    # 태그 형태에 기대지 않고 화면에 보이는 "검색화면" 동작을 찾는다.
+    for frame in page.frames:
+        try:
+            clicked = await frame.evaluate("""
+                () => {
+                  const visible = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
+                  const controls = [...document.querySelectorAll('input, button, a, [role="button"]')];
+                  const button = controls.find(e => {
+                    const labels = [e.textContent, e.value, e.title, e.getAttribute('aria-label')]
+                      .filter(Boolean).map(v => String(v).replace(/\\s+/g, '').trim());
+                    return visible(e) && labels.includes('검색화면');
+                  });
+                  if (!button) return '';
+                  button.click();
+                  return `${button.tagName}#${button.id || ''}`;
+                }
+            """)
+            if clicked:
+                await page.wait_for_selector(SEL_COURT, state='visible', timeout=5000)
+                print(f"  워커 검색화면 재사용 준비 완료 ({clicked})")
+                return True
+        except Exception:
+            continue
+
     selectors = (
         'input[value="검색화면"]',
         'button:has-text("검색화면")',
