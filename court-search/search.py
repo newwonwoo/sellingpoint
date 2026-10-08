@@ -13,7 +13,9 @@ import sys
 import os
 import io
 import re
+import socket
 import threading
+from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from datetime import datetime
@@ -418,19 +420,80 @@ async def save_result_debug(page: Page, case_no: str):
             print(f"  결과 프레임 진단 실패: {e}")
 
 
-async def wait_for_result_page(page: Page, timeout_ms: int = 12000) -> bool:
-    """검색 후 비동기로 렌더링되는 기본내용 표를 기다린다."""
+async def wait_for_result_page(
+    page: Page,
+    expected_case_no: str,
+    timeout_ms: int = 12000,
+) -> bool:
+    """새 사건번호의 기본내용 표가 렌더링될 때까지 기다린다.
+
+    워커 화면을 재사용하므로 직전 사건의 결과 프레임이 잠시 남아 있을 수
+    있다. 제목만 확인하면 그 직전 결과를 새 결과로 오인하므로 사건번호도
+    함께 확인한다.
+    """
     deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
+    normalized_case_no = re.sub(r'\s+', '', expected_case_no)
     while asyncio.get_running_loop().time() < deadline:
         for frame in page.frames:
             try:
                 text = await frame.locator('body').inner_text(timeout=1000)
-                if all(label in text for label in ('사건명', '재판부', '접수일')):
+                normalized_text = re.sub(r'\s+', '', text)
+                if (
+                    all(label in text for label in ('사건명', '재판부', '접수일'))
+                    and normalized_case_no in normalized_text
+                ):
                     return True
             except Exception:
                 continue
         await page.wait_for_timeout(300)
     return False
+
+
+async def restore_search_form(page: Page) -> bool:
+    """결과 화면에서 기존 검색 폼으로 돌아와 워커 페이지를 재사용한다."""
+    try:
+        if await page.locator(SEL_COURT).is_visible(timeout=1000):
+            return True
+    except Exception:
+        pass
+
+    selectors = (
+        'input[value="검색화면"]',
+        'button:has-text("검색화면")',
+        'a:has-text("검색화면")',
+    )
+    for frame in page.frames:
+        for selector in selectors:
+            try:
+                button = frame.locator(selector).first
+                if await button.count() and await button.is_visible():
+                    await button.click()
+                    await page.wait_for_selector(SEL_COURT, state='visible', timeout=5000)
+                    print("  워커 검색화면 재사용 준비 완료")
+                    return True
+            except Exception:
+                continue
+    return False
+
+
+async def diagnose_site_connection(page: Page):
+    """전체 접속 실패 시 DNS와 브라우저 밖 HTTP 경로를 한 번만 진단한다."""
+    host = urlparse(TARGET_URL).hostname
+    try:
+        addresses = await asyncio.to_thread(
+            socket.getaddrinfo, host, 443, type=socket.SOCK_STREAM
+        )
+        ips = sorted({entry[4][0] for entry in addresses})
+        print(f"  진단 DNS: {host} -> {', '.join(ips)}")
+    except Exception as e:
+        print(f"  진단 DNS 실패: {type(e).__name__}: {str(e)[:180]}")
+
+    try:
+        response = await page.context.request.get(TARGET_URL, timeout=15000)
+        print(f"  진단 직접 HTTP: 상태 {response.status}")
+    except Exception as e:
+        detail = str(e).replace('\n', ' ')[:220]
+        print(f"  진단 직접 HTTP 실패: {type(e).__name__}: {detail}")
 
 
 # ──────────────────────────────────────────────
@@ -443,22 +506,26 @@ async def search_one(
     party_name: str = '주택',
     prepare_only: bool = False,
     ocr_executor: ThreadPoolExecutor | None = None,
-    site_connect_lock: asyncio.Lock | None = None,
     connection_circuit: dict | None = None,
 ) -> dict:
     print(f"  조회: {court} / {case_no}")
 
     year, case_type, serial = parse_case_no(case_no)
-    page_ready = False
+    # 워커별 브라우저 화면을 사건마다 새로 열지 않는다. 정상 상태라면 각
+    # 워커가 처음 한 번 연 법원 검색 화면을 다음 사건에서도 계속 사용한다.
+    page_ready = bool(getattr(page, '_court_search_ready', False))
+    if page_ready:
+        page_ready = await restore_search_form(page)
+        page._court_search_ready = page_ready
+    reused_page = page_ready
     stage = '사이트 접속'
     failure_reason = '재시도 한도 초과'
     connection_failures = 0
-    if site_connect_lock is None:
-        site_connect_lock = asyncio.Lock()
     if connection_circuit is None:
         connection_circuit = {
             'consecutive_failures': 0,
             'event': asyncio.Event(),
+            'diagnosed': False,
         }
     circuit_event = connection_circuit['event']
 
@@ -466,37 +533,40 @@ async def search_one(
         try:
             # 페이지 이동. 캡차 불일치 재시도는 현재 화면을 유지하지만,
             # 접속/렌더링 오류 뒤에는 빈 페이지를 재사용하지 않는다.
-            if attempt == 1 or not page_ready:
+            if not page_ready:
                 stage = '사이트 접속'
-                # 법원 사이트의 WebSquare 첫 화면은 동시 초기화에 취약하다.
-                # 이 구간만 한 번씩 실행하고, 이후 캡차/OCR/결과 파싱은 각
-                # 브라우저 워커에서 계속 병렬로 처리한다.
-                async with site_connect_lock:
-                    if circuit_event.is_set():
-                        failure_reason = '법원 사이트 전체 접속 장애'
-                        break
-                    print(f"  단계 {stage} (시도 {attempt}, 접속 순번 대기 해제)")
-                    try:
-                        await page.goto(
-                            TARGET_URL,
-                            wait_until='domcontentloaded',
-                            timeout=40000,
+                if circuit_event.is_set():
+                    failure_reason = '법원 사이트 전체 접속 장애'
+                    break
+                print(f"  단계 {stage} (시도 {attempt})")
+                try:
+                    await page.goto(
+                        TARGET_URL,
+                        wait_until='domcontentloaded',
+                        timeout=40000,
+                    )
+                    # WebSquare 초기화 대기
+                    await page.wait_for_selector(SEL_COURT, timeout=15000)
+                except Exception:
+                    connection_circuit['consecutive_failures'] += 1
+                    global_failures = connection_circuit['consecutive_failures']
+                    if (
+                        global_failures >= MAX_GLOBAL_CONNECTION_FAILURES
+                        and not circuit_event.is_set()
+                    ):
+                        circuit_event.set()
+                        print(
+                            f"  ⛔ 첫 화면 초기화가 {global_failures}회 연속 실패했습니다. "
+                            "남은 사건 조회를 중단합니다."
                         )
-                        # WebSquare 초기화 대기
-                        await page.wait_for_selector(SEL_COURT, timeout=15000)
-                    except Exception:
-                        connection_circuit['consecutive_failures'] += 1
-                        global_failures = connection_circuit['consecutive_failures']
-                        if global_failures >= MAX_GLOBAL_CONNECTION_FAILURES:
-                            circuit_event.set()
-                            print(
-                                f"  ⛔ 첫 화면 초기화가 {global_failures}회 연속 실패했습니다. "
-                                "남은 사건 조회를 중단합니다."
-                            )
-                        raise
-                    else:
-                        connection_circuit['consecutive_failures'] = 0
+                        if not connection_circuit['diagnosed']:
+                            connection_circuit['diagnosed'] = True
+                            await diagnose_site_connection(page)
+                    raise
+                else:
+                    connection_circuit['consecutive_failures'] = 0
                 page_ready = True
+                page._court_search_ready = True
                 connection_failures = 0
 
             # ── 법원 선택 ──
@@ -529,7 +599,7 @@ async def search_one(
 
             # ── 캡차 ──
             stage = '캡차 인식'
-            if attempt > 1:
+            if attempt > 1 or reused_page:
                 # 캡차 새로고침 버튼 클릭
                 reload_btn = page.locator(SEL_CAPTCHA_RELOAD)
                 if await reload_btn.count() > 0:
@@ -560,7 +630,7 @@ async def search_one(
             ):
                 print("  캡차 불일치 → 새 캡차로 재시도")
                 continue
-            if not await wait_for_result_page(page):
+            if not await wait_for_result_page(page, case_no):
                 stage = '결과 화면 대기'
                 content = await page.content()
                 if any(k in content for k in ['인증번호가 일치하지', '자동입력방지문자가 틀', '자동 입력 방지 문자가 틀']):
@@ -602,6 +672,7 @@ async def search_one(
             break
         except PlaywrightTimeout as e:
             page_ready = False
+            page._court_search_ready = False
             detail = str(e).replace('\n', ' ')[:180]
             # goto뿐 아니라 초기 WebSquare 셀렉터 대기도 사이트 접속 단계다.
             # HTML 일부만 내려오고 초기화가 끝나지 않는 경우도 같은 접속
@@ -629,6 +700,7 @@ async def search_one(
             continue
         except Exception as e:
             page_ready = False if any(token in str(e) for token in ('ERR_CONNECTION', 'net::', 'Target closed')) else page_ready
+            page._court_search_ready = page_ready
             detail = str(e).replace('\n', ' ')[:220]
             if any(token in detail for token in ('ERR_CONNECTION', 'net::', 'Connection timed out')):
                 failure_reason = '법원 사이트 연결 실패'
@@ -719,10 +791,10 @@ async def main():
     print(f"조회 워커 {worker_count}개로 실행합니다.")
 
     results = [{} for _ in cases]
-    site_connect_lock = asyncio.Lock()
     connection_circuit = {
         'consecutive_failures': 0,
         'event': asyncio.Event(),
+        'diagnosed': False,
     }
     # EasyOCR 모델은 하나만 메모리에 올린다. 캡차 요청은 이 전용 실행부에
     # 순서대로 들어가며 브라우저 3개는 네트워크/결과 대기를 계속 병렬 수행한다.
@@ -783,7 +855,6 @@ async def main():
                             case['party_name'],
                             prepare_only,
                             ocr_executor,
-                            site_connect_lock,
                             connection_circuit,
                         )
                     finally:
