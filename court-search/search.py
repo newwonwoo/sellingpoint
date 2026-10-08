@@ -36,6 +36,9 @@ MAX_CAPTCHA_RETRY = 5
 # 내려가 있거나 러너에서 연결이 막힌 상태로 20회까지 기다리면 한 건도
 # 오래 멈추므로, 짧게 재시도한 뒤 해당 사건을 실패 처리한다.
 MAX_CONNECTION_RETRY = 3
+# 서로 다른 워커에서도 첫 화면 초기화가 연속으로 실패하면 사이트 전체
+# 접속 장애로 본다. 남은 수백 건을 같은 방식으로 소진하지 않기 위한 값이다.
+MAX_GLOBAL_CONNECTION_FAILURES = 3
 HEADLESS = True
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -440,6 +443,8 @@ async def search_one(
     party_name: str = '주택',
     prepare_only: bool = False,
     ocr_executor: ThreadPoolExecutor | None = None,
+    site_connect_lock: asyncio.Lock | None = None,
+    connection_circuit: dict | None = None,
 ) -> dict:
     print(f"  조회: {court} / {case_no}")
 
@@ -448,6 +453,14 @@ async def search_one(
     stage = '사이트 접속'
     failure_reason = '재시도 한도 초과'
     connection_failures = 0
+    if site_connect_lock is None:
+        site_connect_lock = asyncio.Lock()
+    if connection_circuit is None:
+        connection_circuit = {
+            'consecutive_failures': 0,
+            'event': asyncio.Event(),
+        }
+    circuit_event = connection_circuit['event']
 
     for attempt in range(1, (1 if prepare_only else MAX_CAPTCHA_RETRY) + 1):
         try:
@@ -455,10 +468,34 @@ async def search_one(
             # 접속/렌더링 오류 뒤에는 빈 페이지를 재사용하지 않는다.
             if attempt == 1 or not page_ready:
                 stage = '사이트 접속'
-                print(f"  단계 {stage} (시도 {attempt})")
-                await page.goto(TARGET_URL, wait_until='domcontentloaded', timeout=40000)
-                # WebSquare 초기화 대기
-                await page.wait_for_selector(SEL_COURT, timeout=15000)
+                # 법원 사이트의 WebSquare 첫 화면은 동시 초기화에 취약하다.
+                # 이 구간만 한 번씩 실행하고, 이후 캡차/OCR/결과 파싱은 각
+                # 브라우저 워커에서 계속 병렬로 처리한다.
+                async with site_connect_lock:
+                    if circuit_event.is_set():
+                        failure_reason = '법원 사이트 전체 접속 장애'
+                        break
+                    print(f"  단계 {stage} (시도 {attempt}, 접속 순번 대기 해제)")
+                    try:
+                        await page.goto(
+                            TARGET_URL,
+                            wait_until='domcontentloaded',
+                            timeout=40000,
+                        )
+                        # WebSquare 초기화 대기
+                        await page.wait_for_selector(SEL_COURT, timeout=15000)
+                    except Exception:
+                        connection_circuit['consecutive_failures'] += 1
+                        global_failures = connection_circuit['consecutive_failures']
+                        if global_failures >= MAX_GLOBAL_CONNECTION_FAILURES:
+                            circuit_event.set()
+                            print(
+                                f"  ⛔ 첫 화면 초기화가 {global_failures}회 연속 실패했습니다. "
+                                "남은 사건 조회를 중단합니다."
+                            )
+                        raise
+                    else:
+                        connection_circuit['consecutive_failures'] = 0
                 page_ready = True
                 connection_failures = 0
 
@@ -579,6 +616,9 @@ async def search_one(
                 print(f"  ❌ {stage} 단계 시간 초과 (시도 {attempt}): {detail}")
             if prepare_only:
                 break
+            if circuit_event.is_set():
+                failure_reason = '법원 사이트 전체 접속 장애'
+                break
             if connection_failures >= MAX_CONNECTION_RETRY:
                 print(f"  ⏹ 사이트 접속 {MAX_CONNECTION_RETRY}회 실패 — 이 사건을 중단하고 다음 사건으로 이동합니다.")
                 break
@@ -595,6 +635,9 @@ async def search_one(
                 connection_failures += 1
                 print(f"  ❌ 법원 사이트 연결 실패 (단계: {stage}, 시도 {attempt}): {detail}")
                 print(f"  안내: 새 연결로 재시도합니다 ({connection_failures}/{MAX_CONNECTION_RETRY}).")
+                if circuit_event.is_set():
+                    failure_reason = '법원 사이트 전체 접속 장애'
+                    break
                 if not prepare_only and connection_failures >= MAX_CONNECTION_RETRY:
                     print(f"  ⏹ 사이트 접속 {MAX_CONNECTION_RETRY}회 실패 — 이 사건을 중단하고 다음 사건으로 이동합니다.")
                     break
@@ -676,6 +719,11 @@ async def main():
     print(f"조회 워커 {worker_count}개로 실행합니다.")
 
     results = [{} for _ in cases]
+    site_connect_lock = asyncio.Lock()
+    connection_circuit = {
+        'consecutive_failures': 0,
+        'event': asyncio.Event(),
+    }
     # EasyOCR 모델은 하나만 메모리에 올린다. 캡차 요청은 이 전용 실행부에
     # 순서대로 들어가며 브라우저 3개는 네트워크/결과 대기를 계속 병렬 수행한다.
     ocr_executor = ThreadPoolExecutor(
@@ -714,9 +762,9 @@ async def main():
                 queue.put_nowait(idx)
 
             async def worker(worker_id, page):
-                # 워커가 동시에 첫 요청을 쏘지 않도록 작은 간격을 둔다.
-                await asyncio.sleep(worker_id * 0.5)
                 while True:
+                    if connection_circuit['event'].is_set():
+                        return
                     try:
                         idx = queue.get_nowait()
                     except asyncio.QueueEmpty:
@@ -735,6 +783,8 @@ async def main():
                             case['party_name'],
                             prepare_only,
                             ocr_executor,
+                            site_connect_lock,
+                            connection_circuit,
                         )
                     finally:
                         queue.task_done()
@@ -745,10 +795,29 @@ async def main():
 
         await run_batch(range(len(cases)))
 
+        # 전역 접속 차단기가 열린 뒤 큐에서 시작하지 못한 사건도 결과 파일에
+        # 반드시 남긴다. 이미 성공한 사건과 개별 실패 결과는 그대로 보존한다.
+        if connection_circuit['event'].is_set():
+            deferred = 0
+            for idx, data in enumerate(results):
+                if data:
+                    continue
+                deferred += 1
+                results[idx] = {h: '' for h in OUTPUT_HEADERS} | {
+                    '법원': cases[idx]['court'],
+                    '사건번호': cases[idx]['case_no'],
+                    '사건명': '조회보류: 법원 사이트 접속 불가',
+                    '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                }
+            print(
+                f"\n⛔ 사이트 첫 화면이 {MAX_GLOBAL_CONNECTION_FAILURES}회 연속 "
+                f"열리지 않아 남은 {deferred}건을 조회보류로 저장합니다."
+            )
+
         # 1차 조회에서 접속 장애·캡차 오류 등으로 실패한 사건만 마지막에
         # 한 번 더 시도한다. 성공한 행은 그대로 보존하고, 재시도 결과가
         # 실패해도 최신 실패 사유를 결과 파일에 남긴다.
-        if not prepare_only:
+        if not prepare_only and not connection_circuit['event'].is_set():
             failed = [
                 idx for idx, data in enumerate(results)
                 if str(data.get('사건명', '')).startswith('조회실패')
