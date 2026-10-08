@@ -15,8 +15,12 @@ export default async function handler(req, res) {
 
   try {
     const runId = String(req.query?.runId || '').trim();
+    const artifactId = String(req.query?.artifactId || '').trim();
     if (!/^\d+$/.test(runId)) {
       return res.status(400).json({ error: '결과를 받을 runId가 필요합니다.' });
+    }
+    if (artifactId && !/^\d+$/.test(artifactId)) {
+      return res.status(400).json({ error: '올바른 artifactId가 필요합니다.' });
     }
 
     const listRes = await fetch(
@@ -34,9 +38,14 @@ export default async function handler(req, res) {
     }
 
     const artifacts = (await listRes.json()).artifacts || [];
-    const artifact = artifacts.find((item) => item.name === 'court-search-result' && !item.expired);
+    const artifact = artifactId
+      ? artifacts.find((item) => String(item.id) === artifactId
+          && item.name.startsWith('court-search-partial-') && !item.expired)
+      : artifacts.find((item) => item.name === 'court-search-result' && !item.expired);
     if (!artifact) {
-      return res.status(404).json({ error: '이 실행의 결과 artifact가 아직 없습니다.' });
+      return res.status(404).json({ error: artifactId
+        ? '이 실행에서 해당 중간 결과 파일을 찾을 수 없습니다.'
+        : '이 실행의 전체 결과 artifact가 아직 없습니다.' });
     }
 
     // artifact API는 zip을 반환한다. 결과 파일과 진단 파일이 함께 있을 수 있다.
@@ -51,20 +60,25 @@ export default async function handler(req, res) {
     }
 
     const zip = await JSZip.loadAsync(await fileRes.arrayBuffer());
-    const outputName = Object.keys(zip.files).find((name) =>
-      !zip.files[name].dir && (name === 'output.xlsx' || name.endsWith('/output.xlsx'))
-    );
+    const outputName = Object.keys(zip.files).find((name) => !zip.files[name].dir && (
+      artifactId ? name.toLowerCase().endsWith('.xlsx') : (name === 'output.xlsx' || name.endsWith('/output.xlsx'))
+    ));
     if (!outputName) {
-      return res.status(404).json({ error: 'artifact 안에 output.xlsx가 없습니다.' });
+      return res.status(404).json({ error: 'artifact 안에 결과 엑셀 파일이 없습니다.' });
     }
     const base64 = await zip.files[outputName].async('base64');
+    const range = artifact.name.match(/^court-search-partial-(\d+)-(\d+)$/);
+    const filename = range
+      ? `court-search-${String(Number(range[1])).padStart(4, '0')}-${String(Number(range[2])).padStart(4, '0')}.xlsx`
+      : `court-search-${runId}.xlsx`;
 
     res.setHeader('Cache-Control', 'no-store');
     return res.status(200).json({
-      filename: `court-search-${runId}.xlsx`,
+      filename,
       content: base64,
       size: Buffer.byteLength(base64, 'base64'),
       runId,
+      artifactId: artifactId || null,
     });
 
   } catch (e) {

@@ -24,9 +24,48 @@ permissions:
   contents: read
 
 jobs:
-  search:
+  prepare:
+    name: 조회 묶음 준비
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      total: ${{ steps.plan.outputs.total }}
+      chunk_count: ${{ steps.plan.outputs.chunk_count }}
+    steps:
+      - name: 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 입력 파일 확인
+        env:
+          INPUT_FILE: ${{ inputs.input_file }}
+        run: |
+          case "$INPUT_FILE" in
+            input.xlsx|test_input.xlsx|sample_input.xlsx|test_input_single.xlsx|test_input_user_cases.xlsx) ;;
+            *) echo "허용되지 않은 입력 파일"; exit 1 ;;
+          esac
+          test -f "court-search/$INPUT_FILE"
+          pip install openpyxl==3.1.5
+
+      - name: 20건 단위 작업 계획
+        id: plan
+        env:
+          INPUT_FILE: ${{ inputs.input_file }}
+        run: python court-search/chunk_workbook.py matrix "court-search/$INPUT_FILE" >> "$GITHUB_OUTPUT"
+
+  search:
+    name: 사건 ${{ matrix.start }}-${{ matrix.end }} 조회
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
 
     steps:
       - name: 체크아웃
@@ -52,86 +91,116 @@ jobs:
           fi
           playwright install chromium --with-deps
 
-      - name: 입력 파일 확인
+      - name: ${{ matrix.start }}-${{ matrix.end }}번 입력 준비
         env:
           INPUT_FILE: ${{ inputs.input_file }}
-        run: |
-          case "$INPUT_FILE" in
-            input.xlsx|test_input.xlsx|sample_input.xlsx|test_input_single.xlsx|test_input_user_cases.xlsx) ;;
-            *) echo "허용되지 않은 입력 파일"; exit 1 ;;
-          esac
-          if [ ! -f "court-search/$INPUT_FILE" ]; then
-            echo "❌ 입력 파일 없음: $INPUT_FILE"
-            exit 1
-          fi
-          echo "✅ 입력 파일 확인: $INPUT_FILE"
+          RANGE_START: ${{ matrix.start }}
+          RANGE_END: ${{ matrix.end }}
+        run: >-
+          python court-search/chunk_workbook.py slice
+          "court-search/$INPUT_FILE" court-search/chunk-input.xlsx
+          "$RANGE_START" "$RANGE_END"
 
-      - name: 사건검색 실행
+      - name: ${{ matrix.start }}-${{ matrix.end }}번 사건검색
         env:
-          INPUT_FILE: ${{ inputs.input_file }}
           PREPARE_ONLY: ${{ inputs.prepare_only }}
-          COURT_WORKERS: '3'
+          COURT_WORKERS: ${{ matrix.workers }}
           OCR_TORCH_THREADS: '2'
           CAPTCHA_DATA_DIR: captcha-success
           DEBUG_DIR: debug
           DEBUG_TABLES: '1'
         run: |
           cd court-search
-          args=("$INPUT_FILE" output.xlsx)
+          args=(chunk-input.xlsx output.xlsx)
           if [ "$PREPARE_ONLY" = "true" ]; then args+=(--prepare-only); fi
           python -u search.py "${args[@]}"
 
-      - name: 결과 파일 생성 확인
+      - name: 중간 결과 파일 확정
         env:
-          PREPARE_ONLY: ${{ inputs.prepare_only }}
+          CHUNK_TAG: ${{ matrix.tag }}
+          EXPECTED_COUNT: ${{ matrix.count }}
         run: |
           python - <<'PY'
           import os
           import openpyxl
           from pathlib import Path
-          path = Path("court-search/output.xlsx")
+
+          path = Path('court-search/output.xlsx')
           if not path.exists():
-              raise SystemExit("❌ output.xlsx 없음")
-          wb = openpyxl.load_workbook(path, read_only=True, data_only=True)
-          rows = list(wb.active.iter_rows(values_only=True))
-          if len(rows) < 2:
-              raise SystemExit('결과가 비어 있습니다')
-          if os.environ['PREPARE_ONLY'] == 'true':
-              column = rows[0].index('사건명')
-              failed = [row[:3] for row in rows[1:] if row[column] != '입력점검 완료']
-              if failed:
-                  raise SystemExit(f'입력점검 실패: {failed}')
-          else:
-              column = rows[0].index('사건명')
-              failed = [row[:3] for row in rows[1:]
-                        if not row[column] or str(row[column]).startswith('조회실패')]
-              if failed:
-                  # 일부 사건의 접속/캡차 실패와 관계없이 성공한 행과
-                  # 실패 사유가 담긴 행을 함께 보관한다. 결과 파일 자체가
-                  # 생성된 경우에는 사용자가 부분 결과를 내려받을 수 있어야 한다.
-                  print(f'⚠ 일부 사건 조회 실패({len(failed)}건) — 결과 파일에 실패 사유를 포함해 보관합니다: {failed}')
-          print(f"✅ 결과 파일 생성: {wb.active.max_row - 1}건")
+              raise SystemExit('❌ 중간 output.xlsx 없음')
+          workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+          rows = list(workbook.active.iter_rows(values_only=True))
+          expected = int(os.environ['EXPECTED_COUNT'])
+          if len(rows) - 1 != expected:
+              raise SystemExit(f'중간 결과 행 수 불일치: {len(rows) - 1}/{expected}')
+          target = path.with_name(f"court-search-{os.environ['CHUNK_TAG']}.xlsx")
+          path.replace(target)
+          print(f'✅ 즉시 다운로드 파일 확정: {target} ({expected}건)')
           PY
 
-      - name: 결과 엑셀 보관
+      - name: ${{ matrix.start }}-${{ matrix.end }}번 즉시 다운로드 공개
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: court-search-partial-${{ matrix.tag }}
+          path: court-search/court-search-${{ matrix.tag }}.xlsx
+          if-no-files-found: ignore
+          retention-days: 7
+
+  combine:
+    name: 전체 결과 병합
+    if: always()
+    needs: [prepare, search]
+    runs-on: ubuntu-latest
+    steps:
+      - name: 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 병합 의존성 설치
+        run: pip install openpyxl==3.1.5
+
+      - name: 완료된 20건 파일 받기
+        uses: actions/download-artifact@v4
+        with:
+          pattern: court-search-partial-*
+          path: court-search/chunk-results
+          merge-multiple: true
+
+      - name: 전체 결과 생성
+        env:
+          EXPECTED_TOTAL: ${{ needs.prepare.outputs.total }}
+        run: |
+          python court-search/chunk_workbook.py combine court-search/chunk-results court-search/output.xlsx
+          python - <<'PY'
+          import os
+          import openpyxl
+          workbook = openpyxl.load_workbook('court-search/output.xlsx', read_only=True, data_only=True)
+          actual = workbook.active.max_row - 1
+          expected = int(os.environ['EXPECTED_TOTAL'])
+          if actual != expected:
+              raise SystemExit(f'전체 결과 행 수 불일치: {actual}/{expected}')
+          print(f'✅ 전체 결과 파일 생성: {actual}건')
+          PY
+
+      - name: 전체 결과 엑셀 보관
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: court-search-result
-          path: |
-            court-search/output.xlsx
-            court-search/debug
-            court-search/captcha-success
+          path: court-search/output.xlsx
           if-no-files-found: ignore
+          retention-days: 7
 
       - name: 완료 요약
         if: always()
         run: |
-          if [ -f "court-search/output.xlsx" ]; then
+          if [ -f court-search/output.xlsx ]; then
             ls -lh court-search/output.xlsx
           else
-            echo "output.xlsx 없음"
-          fi
-          if [ -f "court-search/captcha-success/labels.jsonl" ]; then
-            echo "통과 캡차 학습 샘플: $(wc -l < court-search/captcha-success/labels.jsonl)건"
+            echo "output.xlsx 없음 — 공개된 중간 결과를 확인하세요."
           fi

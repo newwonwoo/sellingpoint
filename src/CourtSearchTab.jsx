@@ -47,6 +47,23 @@ function readResultRow(base64) {
   return XLSX.utils.sheet_to_json(sheet, { defval: "" })[0] || null;
 }
 
+function countInputCases(bytes) {
+  const workbook = XLSX.read(bytes, { type: "array" });
+  const sheet = workbook.Sheets[workbook.SheetNames[0]];
+  const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
+  return rows.slice(1).filter((row) => String(row[0] || "").trim() && String(row[1] || "").trim()).length;
+}
+
+function downloadBase64File(file) {
+  const blob = new Blob([decodeBase64(file.content)], { type: XLSX_MIME });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = url;
+  anchor.download = file.filename;
+  anchor.click();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
 function makeSingleInputFile({ court, caseNo, party }) {
   const sheet = XLSX.utils.aoa_to_sheet([
     ["법원", "사건번호", "당사자명"],
@@ -145,6 +162,8 @@ export default function CourtSearchTab() {
   const [polling, setPolling] = useState(false);
   const [resultFile, setResultFile] = useState(null);
   const [singleResult, setSingleResult] = useState(null);
+  const [expectedTotal, setExpectedTotal] = useState(0);
+  const [partialDownloading, setPartialDownloading] = useState("");
   const [error, setError] = useState("");
 
   const fetchResult = useCallback(async (runId) => {
@@ -205,10 +224,17 @@ export default function CourtSearchTab() {
     setResultFile(null);
     setSingleResult(null);
     try {
+      const inputBytes = await inputFile.arrayBuffer();
+      const total = countInputCases(inputBytes);
+      if (!total) {
+        setError("조회할 사건번호가 없습니다.");
+        return;
+      }
+      setExpectedTotal(total);
       const res = await fetch("/api/court-search-trigger", {
         method: "POST",
         headers: { "Content-Type": "application/octet-stream" },
-        body: await inputFile.arrayBuffer(),
+        body: inputBytes,
       });
       const data = await res.json();
       if (!res.ok) {
@@ -250,13 +276,27 @@ export default function CourtSearchTab() {
 
   const handleDownload = () => {
     if (!resultFile) return;
-    const blob = new Blob([decodeBase64(resultFile.content)], { type: XLSX_MIME });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = resultFile.filename;
-    anchor.click();
-    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    downloadBase64File(resultFile);
+  };
+
+  const handlePartialDownload = async (partial) => {
+    if (!runStatus?.runId || !partial?.artifactId) return;
+    setPartialDownloading(partial.artifactId);
+    try {
+      const params = new URLSearchParams({
+        runId: String(runStatus.runId),
+        artifactId: String(partial.artifactId),
+      });
+      const res = await fetch(`/api/court-search-result?${params}`);
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "중간 결과를 불러오지 못했습니다.");
+      downloadBase64File(data);
+      setError("");
+    } catch (e) {
+      setError(e.message || "중간 결과를 불러오지 못했습니다.");
+    } finally {
+      setPartialDownloading("");
+    }
   };
 
   const handleDownloadTemplate = () => {
@@ -268,6 +308,11 @@ export default function CourtSearchTab() {
   };
 
   const isRunning = ["waiting", "queued", "in_progress"].includes(runStatus?.status);
+  const partialResults = runStatus?.partialResults || [];
+  const completedCases = runStatus?.completedCases || 0;
+  const activeRanges = (runStatus?.activeJobs || [])
+    .filter((name) => name.startsWith("사건 "))
+    .join(", ");
   const statusMessage = runStatus?.status === "completed"
     ? (runStatus.conclusion === "success" ? "조회가 끝났습니다. 아래 결과 화면과 엑셀을 확인하세요." : "조회가 끝나지 않았습니다. GitHub 로그에서 실패 원인을 확인하세요.")
     : runStatus?.stageMessage || runStatus?.message || STATUS_MESSAGE[runStatus?.status] || "";
@@ -324,7 +369,25 @@ export default function CourtSearchTab() {
             {runStatus.runUrl && <a className="cs-link" href={runStatus.runUrl} target="_blank" rel="noreferrer">GitHub 로그 보기 →</a>}
           </div>
           {statusMessage && <div className="cs-stage-message">{statusMessage}</div>}
-          {isRunning && <div className="cs-progress"><div className="cs-spinner" /><span>진행 중 — 캡차와 법원 응답을 확인하고 있습니다.</span></div>}
+          {isRunning && <div className="cs-progress"><div className="cs-spinner" /><span>
+            {expectedTotal ? `완료 파일 ${completedCases}/${expectedTotal}건` : `완료 파일 ${completedCases}건`}
+            {activeRanges ? ` · 현재 ${activeRanges}` : " · 다음 작업을 준비하고 있습니다."}
+          </span></div>}
+
+          {mode === "batch" && partialResults.length > 0 && (
+            <div className="cs-partial-results">
+              <div className="cs-partial-title">지금 다운로드 가능한 완료 결과</div>
+              {partialResults.map((partial) => (
+                <div className="cs-upload-row cs-partial-row" key={partial.artifactId}>
+                  <span className="badge ok">{partial.start}–{partial.end}번 완료</span>
+                  <span className="cs-time">{partial.count}건 · {partial.filename}</span>
+                  <button className="go" onClick={() => handlePartialDownload(partial)} disabled={partialDownloading === partial.artifactId}>
+                    {partialDownloading === partial.artifactId ? "받는 중…" : "📥 바로 다운로드"}
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
         </section>
       )}
 
@@ -363,6 +426,9 @@ export default function CourtSearchTab() {
         .cs-time { font-size:12px; color:#666; }
         .cs-stage-message { margin-top:10px; color:#1e3a5f; font-size:13px; }
         .cs-progress { display:flex; align-items:center; gap:10px; margin-top:10px; font-size:13px; color:#444; }
+        .cs-partial-results { margin-top:14px; padding-top:12px; border-top:1px solid #e2e8f0; display:grid; gap:8px; }
+        .cs-partial-title { font-size:13px; font-weight:700; color:#1f2937; }
+        .cs-partial-row { padding:8px 10px; border:1px solid #dbe5ef; border-radius:7px; background:#f8fbff; }
         .cs-spinner { width:18px; height:18px; border:2px solid #ddd; border-top-color:#1F4E79; border-radius:50%; animation:spin .8s linear infinite; }
         @keyframes spin { to { transform:rotate(360deg); } }
         .badge.info { background:#e8f0fe; color:#1a56db; }
