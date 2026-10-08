@@ -420,85 +420,18 @@ async def save_result_debug(page: Page, case_no: str):
             print(f"  결과 프레임 진단 실패: {e}")
 
 
-async def wait_for_result_page(
-    page: Page,
-    expected_case_no: str,
-    timeout_ms: int = 12000,
-) -> bool:
-    """새 사건번호의 기본내용 표가 렌더링될 때까지 기다린다.
-
-    워커 화면을 재사용하므로 직전 사건의 결과 프레임이 잠시 남아 있을 수
-    있다. 제목만 확인하면 그 직전 결과를 새 결과로 오인하므로 사건번호도
-    함께 확인한다.
-    """
+async def wait_for_result_page(page: Page, timeout_ms: int = 12000) -> bool:
+    """검색 후 비동기로 렌더링되는 기본내용 표를 기다린다."""
     deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
-    normalized_case_no = re.sub(r'\s+', '', expected_case_no)
     while asyncio.get_running_loop().time() < deadline:
         for frame in page.frames:
             try:
                 text = await frame.locator('body').inner_text(timeout=1000)
-                normalized_text = re.sub(r'\s+', '', text)
-                if (
-                    all(label in text for label in ('사건명', '재판부', '접수일'))
-                    and normalized_case_no in normalized_text
-                ):
+                if all(label in text for label in ('사건명', '재판부', '접수일')):
                     return True
             except Exception:
                 continue
         await page.wait_for_timeout(300)
-    return False
-
-
-async def restore_search_form(page: Page) -> bool:
-    """결과 화면에서 기존 검색 폼으로 돌아와 워커 페이지를 재사용한다."""
-    try:
-        if await page.locator(SEL_COURT).is_visible(timeout=1000):
-            return True
-    except Exception:
-        pass
-
-    # WebSquare 버튼은 input/button/a 중 어느 형태로도 렌더링될 수 있고
-    # value·title·textContent 중 하나에만 문구가 들어가는 경우가 있다.
-    # 태그 형태에 기대지 않고 화면에 보이는 "검색화면" 동작을 찾는다.
-    for frame in page.frames:
-        try:
-            clicked = await frame.evaluate("""
-                () => {
-                  const visible = e => !!(e.offsetWidth || e.offsetHeight || e.getClientRects().length);
-                  const controls = [...document.querySelectorAll('input, button, a, [role="button"]')];
-                  const button = controls.find(e => {
-                    const labels = [e.textContent, e.value, e.title, e.getAttribute('aria-label')]
-                      .filter(Boolean).map(v => String(v).replace(/\\s+/g, '').trim());
-                    return visible(e) && labels.includes('검색화면');
-                  });
-                  if (!button) return '';
-                  button.click();
-                  return `${button.tagName}#${button.id || ''}`;
-                }
-            """)
-            if clicked:
-                await page.wait_for_selector(SEL_COURT, state='visible', timeout=5000)
-                print(f"  워커 검색화면 재사용 준비 완료 ({clicked})")
-                return True
-        except Exception:
-            continue
-
-    selectors = (
-        'input[value="검색화면"]',
-        'button:has-text("검색화면")',
-        'a:has-text("검색화면")',
-    )
-    for frame in page.frames:
-        for selector in selectors:
-            try:
-                button = frame.locator(selector).first
-                if await button.count() and await button.is_visible():
-                    await button.click()
-                    await page.wait_for_selector(SEL_COURT, state='visible', timeout=5000)
-                    print("  워커 검색화면 재사용 준비 완료")
-                    return True
-            except Exception:
-                continue
     return False
 
 
@@ -537,13 +470,7 @@ async def search_one(
     print(f"  조회: {court} / {case_no}")
 
     year, case_type, serial = parse_case_no(case_no)
-    # 워커별 브라우저 화면을 사건마다 새로 열지 않는다. 정상 상태라면 각
-    # 워커가 처음 한 번 연 법원 검색 화면을 다음 사건에서도 계속 사용한다.
-    page_ready = bool(getattr(page, '_court_search_ready', False))
-    if page_ready:
-        page_ready = await restore_search_form(page)
-        page._court_search_ready = page_ready
-    reused_page = page_ready
+    page_ready = False
     stage = '사이트 접속'
     failure_reason = '재시도 한도 초과'
     connection_failures = 0
@@ -592,7 +519,6 @@ async def search_one(
                 else:
                     connection_circuit['consecutive_failures'] = 0
                 page_ready = True
-                page._court_search_ready = True
                 connection_failures = 0
 
             # ── 법원 선택 ──
@@ -625,7 +551,7 @@ async def search_one(
 
             # ── 캡차 ──
             stage = '캡차 인식'
-            if attempt > 1 or reused_page:
+            if attempt > 1:
                 # 캡차 새로고침 버튼 클릭
                 reload_btn = page.locator(SEL_CAPTCHA_RELOAD)
                 if await reload_btn.count() > 0:
@@ -656,7 +582,7 @@ async def search_one(
             ):
                 print("  캡차 불일치 → 새 캡차로 재시도")
                 continue
-            if not await wait_for_result_page(page, case_no):
+            if not await wait_for_result_page(page):
                 stage = '결과 화면 대기'
                 content = await page.content()
                 if any(k in content for k in ['인증번호가 일치하지', '자동입력방지문자가 틀', '자동 입력 방지 문자가 틀']):
@@ -698,7 +624,6 @@ async def search_one(
             break
         except PlaywrightTimeout as e:
             page_ready = False
-            page._court_search_ready = False
             detail = str(e).replace('\n', ' ')[:180]
             # goto뿐 아니라 초기 WebSquare 셀렉터 대기도 사이트 접속 단계다.
             # HTML 일부만 내려오고 초기화가 끝나지 않는 경우도 같은 접속
@@ -726,7 +651,6 @@ async def search_one(
             continue
         except Exception as e:
             page_ready = False if any(token in str(e) for token in ('ERR_CONNECTION', 'net::', 'Target closed')) else page_ready
-            page._court_search_ready = page_ready
             detail = str(e).replace('\n', ' ')[:220]
             if any(token in detail for token in ('ERR_CONNECTION', 'net::', 'Connection timed out')):
                 failure_reason = '법원 사이트 연결 실패'
