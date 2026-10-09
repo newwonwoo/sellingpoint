@@ -42,12 +42,6 @@ function decodeBase64(base64) {
   return Uint8Array.from(binary, (c) => c.charCodeAt(0));
 }
 
-function readResultRow(base64) {
-  const workbook = XLSX.read(decodeBase64(base64), { type: "array" });
-  const sheet = workbook.Sheets[workbook.SheetNames[0]];
-  return XLSX.utils.sheet_to_json(sheet, { defval: "" })[0] || null;
-}
-
 function countInputCases(bytes) {
   const workbook = XLSX.read(bytes, { type: "array" });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
@@ -68,7 +62,9 @@ function downloadBase64File(file) {
 function readSavedRun() {
   try {
     const value = JSON.parse(window.localStorage.getItem(ACTIVE_RUN_STORAGE_KEY) || "null");
-    return value?.headSha ? value : null;
+    if (value?.mode === "single" && value.requestId) return value;
+    if (value?.mode === "batch" && value.headSha) return value;
+    return null;
   } catch {
     return null;
   }
@@ -80,17 +76,6 @@ function saveRun(value) {
   } catch {
     // 저장소 사용이 막힌 브라우저에서도 현재 탭의 조회는 계속 진행한다.
   }
-}
-
-function makeSingleInputFile({ court, caseNo, party }) {
-  const sheet = XLSX.utils.aoa_to_sheet([
-    ["법원", "사건번호", "당사자명"],
-    [court.trim(), caseNo.trim(), party.trim() || "주택"],
-  ]);
-  const workbook = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(workbook, sheet, "입력");
-  const bytes = XLSX.write(workbook, { type: "array", bookType: "xlsx" });
-  return new File([bytes], "single-case-input.xlsx", { type: XLSX_MIME });
 }
 
 function valueOf(row, key) {
@@ -172,6 +157,9 @@ export default function CourtSearchTab() {
   const fileRef = useRef(null);
   const pollRef = useRef(null);
   const headShaRef = useRef("");
+  const singleRequestRef = useRef("");
+  const pollModeRef = useRef("single");
+  const singleResultLoadedRef = useRef(false);
   const [mode, setMode] = useState("single");
   const [file, setFile] = useState(null);
   const [singleCase, setSingleCase] = useState({ court: "", caseNo: "", party: "주택" });
@@ -212,7 +200,7 @@ export default function CourtSearchTab() {
     }
   }, []);
 
-  const fetchResult = useCallback(async (runId) => {
+  const fetchBatchResult = useCallback(async (runId) => {
     if (!runId) return false;
     try {
       const res = await fetch(`/api/court-search-result?runId=${encodeURIComponent(runId)}`);
@@ -222,7 +210,6 @@ export default function CourtSearchTab() {
         return false;
       }
       setResultFile(data);
-      setSingleResult(readResultRow(data.content));
       setError("");
       return true;
     } catch (e) {
@@ -231,46 +218,85 @@ export default function CourtSearchTab() {
     }
   }, []);
 
-  const checkStatus = useCallback(async (sha = headShaRef.current) => {
+  const fetchSingleResult = useCallback(async (runId) => {
+    if (!runId) return false;
     try {
-      const query = sha ? `?headSha=${encodeURIComponent(sha)}` : "";
-      const res = await fetch(`/api/court-search-status${query}`);
+      const res = await fetch(`/api/court-search-single-result?runId=${encodeURIComponent(runId)}`);
+      const data = await res.json();
+      if (!res.ok) {
+        setError(data.error || "단건 결과를 불러오지 못했습니다.");
+        return false;
+      }
+      setSingleResult(data.row);
+      singleResultLoadedRef.current = true;
+      setError("");
+      return true;
+    } catch (e) {
+      setError(e.message || "단건 결과를 불러오지 못했습니다.");
+      return false;
+    }
+  }, []);
+
+  const checkStatus = useCallback(async () => {
+    try {
+      const activeMode = pollModeRef.current;
+      const requestId = singleRequestRef.current;
+      const sha = headShaRef.current;
+      if (activeMode === "single" && !requestId) return;
+      if (activeMode === "batch" && !sha) return;
+      const endpoint = activeMode === "single"
+        ? `/api/court-search-single-status?requestId=${encodeURIComponent(requestId)}`
+        : `/api/court-search-status?headSha=${encodeURIComponent(sha)}`;
+      const res = await fetch(endpoint);
       const data = await res.json();
       if (!res.ok) throw new Error(data.error || "실행 상태를 불러오지 못했습니다.");
       setRunStatus(data);
-      if (sha && data.runId) {
+      if (data.runId) {
         saveRun({
           ...readSavedRun(),
-          headSha: sha,
+          mode: activeMode,
+          ...(activeMode === "single" ? { requestId } : { headSha: sha }),
           runId: data.runId,
         });
+      }
+      if (activeMode === "single" && data.resultReady && data.runId && !singleResultLoadedRef.current) {
+        await fetchSingleResult(data.runId);
       }
       if (data.status === "completed") {
         setPolling(false);
         clearInterval(pollRef.current);
-        if (sha && data.conclusion === "success") await fetchResult(data.runId);
+        if (data.conclusion === "success") {
+          if (activeMode === "single" && !singleResultLoadedRef.current) await fetchSingleResult(data.runId);
+          if (activeMode === "batch") await fetchBatchResult(data.runId);
+        }
       }
     } catch (e) {
       setError(e.message || "실행 상태를 불러오지 못했습니다.");
     }
-  }, [fetchResult]);
+  }, [fetchBatchResult, fetchSingleResult]);
 
   useEffect(() => {
     if (!polling) return undefined;
-    pollRef.current = setInterval(() => checkStatus(headShaRef.current), 8000);
-    checkStatus(headShaRef.current);
+    pollRef.current = setInterval(checkStatus, 8000);
+    checkStatus();
     return () => clearInterval(pollRef.current);
   }, [polling, checkStatus]);
 
   useEffect(() => {
     const saved = readSavedRun();
-    if (saved?.headSha) {
+    if (saved?.mode === "single" && saved.requestId) {
+      pollModeRef.current = "single";
+      singleRequestRef.current = saved.requestId;
+      setMode("single");
+      setExpectedTotal(1);
+      setPolling(true);
+      checkStatus();
+    } else if (saved?.mode === "batch" && saved.headSha) {
+      pollModeRef.current = "batch";
       headShaRef.current = saved.headSha;
       if (saved.expectedTotal) setExpectedTotal(saved.expectedTotal);
-      if (saved.mode === "single" || saved.mode === "batch") setMode(saved.mode);
+      setMode("batch");
       setPolling(true);
-      checkStatus(saved.headSha);
-    } else {
       checkStatus();
     }
     return () => clearInterval(pollRef.current);
@@ -310,7 +336,9 @@ export default function CourtSearchTab() {
         return;
       }
       headShaRef.current = data.headSha;
-      saveRun({ headSha: data.headSha, expectedTotal: total, mode });
+      singleRequestRef.current = "";
+      pollModeRef.current = "batch";
+      saveRun({ headSha: data.headSha, expectedTotal: total, mode: "batch" });
       setRunStatus({ status: "waiting", conclusion: null, headSha: data.headSha, queuedAt: data.queuedAt });
       setPolling(true);
     } catch (e) {
@@ -331,12 +359,41 @@ export default function CourtSearchTab() {
     setError("");
   };
 
-  const handleSingleRun = () => {
+  const handleSingleRun = async () => {
     if (!singleCase.court.trim() || !singleCase.caseNo.trim()) {
       setError("법원과 사건번호를 입력하세요.");
       return;
     }
-    startWithFile(makeSingleInputFile(singleCase));
+    setError("");
+    setUploading(true);
+    setResultFile(null);
+    setSingleResult(null);
+    singleResultLoadedRef.current = false;
+    try {
+      const res = await fetch("/api/court-search-single-trigger", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          court: singleCase.court.trim(),
+          caseNo: singleCase.caseNo.trim(),
+          party: singleCase.party.trim() || "주택",
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "단건 조회 실행 실패");
+      if (!data.requestId) throw new Error("단건 조회 식별자를 받지 못했습니다.");
+      headShaRef.current = "";
+      singleRequestRef.current = data.requestId;
+      pollModeRef.current = "single";
+      setExpectedTotal(1);
+      saveRun({ mode: "single", requestId: data.requestId, expectedTotal: 1 });
+      setRunStatus({ status: "waiting", conclusion: null, requestId: data.requestId, queuedAt: data.queuedAt });
+      setPolling(true);
+    } catch (e) {
+      setError(e.message || "단건 조회 실행 실패");
+    } finally {
+      setUploading(false);
+    }
   };
 
   const handleDownload = () => {
@@ -368,10 +425,12 @@ export default function CourtSearchTab() {
   const partialResults = runStatus?.partialResults || [];
   const completedCases = runStatus?.completedCases || 0;
   const activeRanges = (runStatus?.activeJobs || [])
-    .filter((name) => name.startsWith("사건 ") || name.startsWith("새 러너 재조회 "))
+    .filter((name) => mode === "single" || name.startsWith("사건 ") || name.startsWith("새 러너 재조회 "))
     .join(", ");
   const statusMessage = runStatus?.status === "completed"
-    ? (runStatus.conclusion === "success" ? "조회가 끝났습니다. 아래 결과 화면과 엑셀을 확인하세요." : "조회가 끝나지 않았습니다. GitHub 로그에서 실패 원인을 확인하세요.")
+    ? (runStatus.conclusion === "success"
+      ? (mode === "single" ? "단건 조회가 끝났습니다. 아래 결과 화면을 확인하세요." : "일괄조회가 끝났습니다. 아래 결과 엑셀을 확인하세요.")
+      : "조회가 끝나지 않았습니다. GitHub 로그에서 실패 원인을 확인하세요.")
     : runStatus?.stageMessage || runStatus?.message || STATUS_MESSAGE[runStatus?.status] || "";
 
   return (
@@ -427,8 +486,10 @@ export default function CourtSearchTab() {
           </div>
           {statusMessage && <div className="cs-stage-message">{statusMessage}</div>}
           {isRunning && <div className="cs-progress"><div className="cs-spinner" /><span>
-            {expectedTotal ? `완료 파일 ${completedCases}/${expectedTotal}건` : `완료 파일 ${completedCases}건`}
-            {activeRanges ? ` · 현재 ${activeRanges}` : " · 다음 작업을 준비하고 있습니다."}
+            {mode === "single"
+              ? (activeRanges ? `현재 ${activeRanges}` : "단건 조회 실행을 준비하고 있습니다.")
+              : <>{expectedTotal ? `완료 파일 ${completedCases}/${expectedTotal}건` : `완료 파일 ${completedCases}건`}
+                {activeRanges ? ` · 현재 ${activeRanges}` : " · 다음 작업을 준비하고 있습니다."}</>}
           </span></div>}
 
           {mode === "batch" && partialResults.length > 0 && (
@@ -450,21 +511,30 @@ export default function CourtSearchTab() {
 
       {mode === "single" && singleResult && <SingleResultView row={singleResult} />}
 
-      {resultFile && (
+      {mode === "batch" && resultFile && (
         <section className="panel">
           <div className="cs-step"><span className="cs-badge">3</span><span className="cs-label">결과 엑셀</span></div>
           <div className="cs-upload-row"><span className="badge ok">결과 준비 완료</span><span className="cs-time">{resultFile.filename}</span><button className="go" onClick={handleDownload}>📥 다운로드</button></div>
-          <p className="cs-hint">실제 조회 결과 파일입니다. 단일 사건은 위 화면에서도 같은 내용을 확인할 수 있습니다.</p>
+          <p className="cs-hint">완료된 일괄조회 결과 파일입니다.</p>
         </section>
       )}
 
-      {!resultFile && runStatus?.status === "completed" && runStatus?.conclusion === "success" && (
+      {mode === "batch" && !resultFile && runStatus?.status === "completed" && runStatus?.conclusion === "success" && (
         <section className="panel">
           <div className="cs-step"><span className="cs-badge">3</span><span className="cs-label">결과 엑셀</span></div>
           <div className="cs-upload-row">
             <span className="badge ok">결과 준비 완료</span>
             <button className="go" onClick={() => downloadResult(runStatus.runId)}>📥 전체 결과 다운로드</button>
-            {mode === "single" && <button className="cs-link" onClick={() => fetchResult(runStatus.runId)}>화면 결과 다시 불러오기</button>}
+          </div>
+        </section>
+      )}
+
+      {mode === "single" && !singleResult && runStatus?.status === "completed" && runStatus?.conclusion === "success" && (
+        <section className="panel">
+          <div className="cs-step"><span className="cs-badge">3</span><span className="cs-label">화면 결과</span></div>
+          <div className="cs-upload-row">
+            <span className="badge ok">조회 완료</span>
+            <button className="go" onClick={() => fetchSingleResult(runStatus.runId)}>화면 결과 다시 불러오기</button>
           </div>
         </section>
       )}

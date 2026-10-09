@@ -1,0 +1,302 @@
+name: 대법원 단건 사건조회
+run-name: 단건조회-${{ inputs.request_id }}
+
+on:
+  workflow_dispatch:
+    inputs:
+      request_id:
+        description: '웹앱 요청 식별자'
+        type: string
+        required: true
+      court:
+        description: '법원명'
+        type: string
+        required: true
+      case_no:
+        description: '사건번호'
+        type: string
+        required: true
+      party:
+        description: '당사자명'
+        type: string
+        required: false
+        default: '주택'
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  primary:
+    name: 단건 조회
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    outputs:
+      retry_required: ${{ steps.inspect.outputs.retry_required }}
+    steps:
+      - name: 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: court-search/requirements.txt
+
+      - name: 조회 의존성 설치
+        run: |
+          pip install -r court-search/requirements.txt
+          playwright install chromium --with-deps
+
+      - name: 누적 캡차 모델 불러오기
+        uses: actions/cache/restore@v4
+        with:
+          path: court-search/captcha-model
+          key: court-captcha-v2-${{ github.run_id }}
+          restore-keys: |
+            court-captcha-v2-
+
+      - name: 단건 JSON 입력 준비
+        env:
+          COURT: ${{ inputs.court }}
+          CASE_NO: ${{ inputs.case_no }}
+          PARTY: ${{ inputs.party }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          payload = {
+              'court': os.environ['COURT'].strip(),
+              'case_no': os.environ['CASE_NO'].strip(),
+              'party': os.environ.get('PARTY', '').strip() or '주택',
+          }
+          if not payload['court'] or not payload['case_no']:
+              raise SystemExit('법원과 사건번호가 필요합니다.')
+          Path('court-search/single-input.json').write_text(
+              json.dumps(payload, ensure_ascii=False), encoding='utf-8'
+          )
+          PY
+
+      - name: 단건 사건검색
+        env:
+          COURT_WORKERS: '1'
+          OCR_TORCH_THREADS: '2'
+          CAPTCHA_DATA_DIR: captcha-single-success
+          CAPTCHA_SEED_DIR: captcha-model
+          DEBUG_DIR: single-debug
+          DEBUG_TABLES: '1'
+        run: >-
+          python -u court-search/search.py
+          court-search/single-input.json
+          court-search/single-result.json
+
+      - name: 단건 결과 확인
+        id: inspect
+        run: |
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          from pathlib import Path
+          data = json.loads(Path('court-search/single-result.json').read_text(encoding='utf-8'))
+          rows = data.get('results', [])
+          if len(rows) != 1:
+              raise SystemExit(f'단건 결과 행 수 오류: {len(rows)}')
+          name = str(rows[0].get('사건명') or '')
+          print(f"retry_required={'true' if name.startswith(('조회실패', '조회보류')) else 'false'}")
+          PY
+
+      - name: 단건 1차 JSON 결과 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: court-search-single-primary
+          path: court-search/single-result.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: 단건 통과 캡차 후보 확정
+        if: always()
+        run: |
+          mkdir -p court-search/captcha-single-success/images
+          touch court-search/captcha-single-success/labels.jsonl
+
+      - name: 단건 통과 캡차 후보 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: captcha-single-primary
+          path: court-search/captcha-single-success
+          if-no-files-found: error
+          retention-days: 7
+
+  retry:
+    name: 단건 새 러너 재조회
+    needs: primary
+    if: ${{ needs.primary.outputs.retry_required == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: court-search/requirements.txt
+
+      - name: 재조회 의존성 설치
+        run: |
+          pip install -r court-search/requirements.txt
+          playwright install chromium --with-deps
+
+      - name: 누적 캡차 모델 불러오기
+        uses: actions/cache/restore@v4
+        with:
+          path: court-search/captcha-model
+          key: court-captcha-v2-${{ github.run_id }}-retry
+          restore-keys: |
+            court-captcha-v2-
+
+      - name: 단건 JSON 입력 준비
+        env:
+          COURT: ${{ inputs.court }}
+          CASE_NO: ${{ inputs.case_no }}
+          PARTY: ${{ inputs.party }}
+        run: |
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+          Path('court-search/single-input.json').write_text(json.dumps({
+              'court': os.environ['COURT'].strip(),
+              'case_no': os.environ['CASE_NO'].strip(),
+              'party': os.environ.get('PARTY', '').strip() or '주택',
+          }, ensure_ascii=False), encoding='utf-8')
+          PY
+
+      - name: 단건 새 실행환경 재조회
+        env:
+          COURT_WORKERS: '1'
+          OCR_TORCH_THREADS: '2'
+          CAPTCHA_DATA_DIR: captcha-single-retry-success
+          CAPTCHA_SEED_DIR: captcha-model
+          DEBUG_DIR: single-retry-debug
+          DEBUG_TABLES: '1'
+        run: >-
+          python -u court-search/search.py
+          court-search/single-input.json
+          court-search/single-retry-result.json
+
+      - name: 단건 재조회 JSON 결과 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: court-search-single-retry
+          path: court-search/single-retry-result.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: 재조회 통과 캡차 후보 확정
+        if: always()
+        run: |
+          mkdir -p court-search/captcha-single-retry-success/images
+          touch court-search/captcha-single-retry-success/labels.jsonl
+
+      - name: 재조회 통과 캡차 후보 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: captcha-single-retry
+          path: court-search/captcha-single-retry-success
+          if-no-files-found: error
+          retention-days: 7
+
+  finalize:
+    name: 단건 결과 확정 및 학습
+    needs: [primary, retry]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: 체크아웃
+        uses: actions/checkout@v4
+
+      - name: Python 설정
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: 단건 1차 결과 받기
+        uses: actions/download-artifact@v4
+        with:
+          name: court-search-single-primary
+          path: court-search/single-primary
+
+      - name: 단건 재조회 결과 받기
+        if: ${{ needs.retry.result == 'success' }}
+        uses: actions/download-artifact@v4
+        with:
+          name: court-search-single-retry
+          path: court-search/single-retry
+
+      - name: 단건 최종 JSON 결과 확정
+        run: |
+          mkdir -p court-search/single-final
+          if [ -f court-search/single-retry/single-retry-result.json ]; then
+            cp court-search/single-retry/single-retry-result.json court-search/single-final/result.json
+          else
+            cp court-search/single-primary/single-result.json court-search/single-final/result.json
+          fi
+          python - <<'PY'
+          import json
+          from pathlib import Path
+          rows = json.loads(Path('court-search/single-final/result.json').read_text(encoding='utf-8')).get('results', [])
+          if len(rows) != 1:
+              raise SystemExit(f'단건 최종 결과 행 수 오류: {len(rows)}')
+          print(f"✅ 단건 JSON 결과 확정: {rows[0].get('사건번호')} / {rows[0].get('사건명')}")
+          PY
+
+      - name: 단건 JSON 결과 공개
+        uses: actions/upload-artifact@v4
+        with:
+          name: court-search-single-result
+          path: court-search/single-final/result.json
+          if-no-files-found: error
+          retention-days: 7
+
+      # JSON 결과를 먼저 확정한 후 통과 캡차만 정식 학습한다.
+      - name: 기존 누적 캡차 모델 복원
+        uses: actions/cache/restore@v4
+        with:
+          path: court-search/captcha-model
+          key: court-captcha-v2-${{ github.run_id }}
+          restore-keys: |
+            court-captcha-v2-
+
+      - name: 단건 통과 캡차 후보 받기
+        uses: actions/download-artifact@v4
+        with:
+          pattern: captcha-single-*
+          path: court-search/captcha-single-candidates
+
+      - name: 공식 캡차 학습
+        run: |
+          python court-search/captcha_training.py \
+            --baseline court-search/captcha-model \
+            --candidate court-search/captcha-single-candidates \
+            --output court-search/captcha-model
+          cat court-search/captcha-model/training-report.json
+
+      - name: 누적 캡차 모델 감사자료 보관
+        uses: actions/upload-artifact@v4
+        with:
+          name: captcha-learning-model
+          path: court-search/captcha-model
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 다음 실행용 누적 캡차 모델 저장
+        uses: actions/cache/save@v4
+        with:
+          path: court-search/captcha-model
+          key: court-captcha-v2-${{ github.run_id }}

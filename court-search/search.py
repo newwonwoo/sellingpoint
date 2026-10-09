@@ -137,9 +137,27 @@ SEL_SEARCH  = '#mf_ssgoTopMainTab_contents_content1_body_btn_srchCs'
 
 
 # ──────────────────────────────────────────────
-# 엑셀 입력 읽기
+# 입력 읽기 (일괄=xlsx, 단건=json)
 # ──────────────────────────────────────────────
 def read_input(path: str) -> list[dict]:
+    if Path(path).suffix.lower() == '.json':
+        payload = json.loads(Path(path).read_text(encoding='utf-8'))
+        items = payload.get('cases', [payload]) if isinstance(payload, dict) else payload
+        rows = []
+        for index, item in enumerate(items, start=1):
+            court = str(item.get('court') or '').strip()
+            case_no = str(item.get('case_no') or item.get('caseNo') or '').strip()
+            party = str(item.get('party_name') or item.get('party') or '주택').strip()
+            if not court or not case_no:
+                raise ValueError(f"JSON {index}번: court와 case_no가 필요합니다.")
+            rows.append({
+                'row': index,
+                'court': court,
+                'case_no': case_no,
+                'party_name': party or '주택',
+            })
+        return rows
+
     wb = openpyxl.load_workbook(path, data_only=True)
     ws = wb.active
     headers = {str(c.value).strip(): c.column - 1 for c in ws[1] if c.value is not None}
@@ -679,9 +697,21 @@ async def search_one(
 
 
 # ──────────────────────────────────────────────
-# 엑셀 출력
+# 출력 (일괄=xlsx, 단건=json)
 # ──────────────────────────────────────────────
 def write_output(results: list[dict], path: str):
+    if Path(path).suffix.lower() == '.json':
+        normalized = [
+            {header: data.get(header, '') for header in OUTPUT_HEADERS}
+            for data in results
+        ]
+        Path(path).write_text(
+            json.dumps({'results': normalized}, ensure_ascii=False, indent=2),
+            encoding='utf-8',
+        )
+        print(f"\n✅ JSON 결과 저장: {path} ({len(results)}건)")
+        return
+
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = '조회결과'
