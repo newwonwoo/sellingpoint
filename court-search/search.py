@@ -25,7 +25,7 @@ from openpyxl.styles import Font, PatternFill, Alignment
 from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeout
 
 sys.path.insert(0, os.path.dirname(__file__))
-from captcha_solver import learn_success, predict_captcha
+from captcha_solver import learn_success, load_success_dataset, predict_captcha
 
 # ──────────────────────────────────────────────
 # 설정
@@ -48,6 +48,9 @@ INPUT_FILE = os.path.join(BASE_DIR, 'input.xlsx')
 OUTPUT_FILE = os.path.join(BASE_DIR, 'output.xlsx')
 CAPTCHA_DATA_DIR = os.environ.get(
     'CAPTCHA_DATA_DIR', os.path.join(BASE_DIR, 'captcha-success')
+)
+CAPTCHA_SEED_DIR = os.environ.get(
+    'CAPTCHA_SEED_DIR', os.path.join(BASE_DIR, 'captcha-model')
 )
 CAPTCHA_SAMPLE_LOCK = threading.Lock()
 
@@ -728,6 +731,13 @@ async def main():
 
     cases = read_input(input_path)
     print(f"총 {len(cases)}건 조회 시작\n")
+
+    if not prepare_only:
+        seed_stats = load_success_dataset(CAPTCHA_SEED_DIR)
+        print(
+            f"누적 캡차 모델 적재: {seed_stats['loaded']}건"
+            f" (제외 {seed_stats['skipped']}건)"
+        )
 
     # 입력 건수를 먼저 확인하고 최대 3개 워커가 공용 큐에서 한 건씩
     # 가져간다. 먼저 끝난 워커가 다음 순번을 즉시 이어받는다.

@@ -19,9 +19,15 @@ on:
         type: boolean
         required: false
         default: true
+      captcha_seed_run_id:
+        description: '기존 실행의 통과 캡차를 최초 모델로 가져올 run ID (선택)'
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   prepare:
@@ -91,6 +97,14 @@ jobs:
           fi
           playwright install chromium --with-deps
 
+      - name: 누적 캡차 모델 불러오기
+        uses: actions/cache/restore@v4
+        with:
+          path: court-search/captcha-model
+          key: court-captcha-v2-${{ github.run_id }}
+          restore-keys: |
+            court-captcha-v2-
+
       - name: ${{ matrix.start }}-${{ matrix.end }}번 입력 준비
         env:
           INPUT_FILE: ${{ inputs.input_file }}
@@ -107,6 +121,7 @@ jobs:
           COURT_WORKERS: ${{ matrix.workers }}
           OCR_TORCH_THREADS: '2'
           CAPTCHA_DATA_DIR: captcha-success
+          CAPTCHA_SEED_DIR: captcha-model
           DEBUG_DIR: debug
           DEBUG_TABLES: '1'
         run: |
@@ -145,6 +160,22 @@ jobs:
           name: court-search-partial-${{ matrix.tag }}
           path: court-search/court-search-${{ matrix.tag }}.xlsx
           if-no-files-found: ignore
+          retention-days: 7
+
+      - name: 통과 캡차 학습 후보 확정
+        if: always()
+        run: |
+          mkdir -p court-search/captcha-success/images
+          touch court-search/captcha-success/labels.jsonl
+          echo "통과 확인 샘플: $(wc -l < court-search/captcha-success/labels.jsonl)건"
+
+      - name: 통과 캡차 학습 후보 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: captcha-learning-candidates-${{ matrix.tag }}
+          path: court-search/captcha-success
+          if-no-files-found: error
           retention-days: 7
 
   combine:
@@ -196,6 +227,66 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+      # 결과 파일을 먼저 확정한 뒤에만 통과 캡차를 정식 누적 모델로 승격한다.
+      - name: 기존 누적 캡차 모델 복원
+        uses: actions/cache/restore@v4
+        with:
+          path: court-search/captcha-model
+          key: court-captcha-v2-${{ github.run_id }}
+          restore-keys: |
+            court-captcha-v2-
+
+      - name: 이번 실행의 통과 캡차 후보 받기
+        uses: actions/download-artifact@v4
+        with:
+          pattern: captcha-learning-candidates-*
+          path: court-search/captcha-candidates
+
+      - name: 기존 실행 학습자료 최초 이관
+        if: ${{ inputs.captcha_seed_run_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SEED_RUN_ID: ${{ inputs.captcha_seed_run_id }}
+        run: |
+          case "$SEED_RUN_ID" in
+            *[!0-9]*|'') echo "올바르지 않은 seed run ID"; exit 1 ;;
+          esac
+          gh run download "$SEED_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name court-search-result \
+            --dir court-search/legacy-captcha
+
+      - name: 공식 캡차 학습
+        env:
+          SEED_RUN_ID: ${{ inputs.captcha_seed_run_id }}
+        run: |
+          args=(
+            --baseline court-search/captcha-model
+            --candidate court-search/captcha-candidates
+            --output court-search/captcha-model
+          )
+          if [ -n "$SEED_RUN_ID" ]; then
+            args+=(--candidate court-search/legacy-captcha)
+          fi
+          python court-search/captcha_training.py "${args[@]}"
+          cat court-search/captcha-model/training-report.json
+
+      - name: 누적 캡차 모델 감사자료 보관
+        if: ${{ inputs.prepare_only == false || inputs.captcha_seed_run_id != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: captcha-learning-model
+          path: court-search/captcha-model
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 다음 실행용 누적 캡차 모델 저장
+        if: ${{ inputs.prepare_only == false || inputs.captcha_seed_run_id != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: court-search/captcha-model
+          key: court-captcha-v2-${{ github.run_id }}
+
       - name: 완료 요약
         if: always()
         run: |
@@ -203,4 +294,8 @@ jobs:
             ls -lh court-search/output.xlsx
           else
             echo "output.xlsx 없음 — 공개된 중간 결과를 확인하세요."
+          fi
+          if [ -f court-search/captcha-model/training-report.json ]; then
+            echo "캡차 학습 결과:"
+            cat court-search/captcha-model/training-report.json
           fi

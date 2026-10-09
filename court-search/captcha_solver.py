@@ -6,9 +6,12 @@
 """
 
 import io
+import hashlib
+import json
 import os
 import re
 import threading
+from pathlib import Path
 import numpy as np
 from PIL import Image, ImageFilter, ImageEnhance, ImageOps
 
@@ -87,6 +90,37 @@ def learn_success(img_bytes: bytes, answer: str) -> int:
                 del bank[0]
         _accepted_captcha_count += 1
         return _accepted_captcha_count
+
+
+def load_success_dataset(root: str | os.PathLike) -> dict:
+    """이전 실행에서 확정한 통과 샘플을 온라인 템플릿에 적재한다."""
+    dataset = Path(root)
+    metadata = dataset / 'labels.jsonl'
+    stats = {'loaded': 0, 'skipped': 0}
+    if not metadata.exists():
+        return stats
+
+    seen = set()
+    for raw in metadata.read_text(encoding='utf-8').splitlines():
+        try:
+            record = json.loads(raw)
+            answer = str(record['answer'])
+            digest = str(record['sha256'])
+            image_path = dataset / str(record['image'])
+            image = image_path.read_bytes()
+            if digest in seen or not re.fullmatch(r'\d{6}', answer):
+                raise ValueError('invalid or duplicate sample')
+            if hashlib.sha256(image).hexdigest() != digest:
+                raise ValueError('sample checksum mismatch')
+            before = _accepted_captcha_count
+            after = learn_success(image, answer)
+            if after == before:
+                raise ValueError('sample could not be learned')
+            seen.add(digest)
+            stats['loaded'] += 1
+        except (KeyError, OSError, ValueError, json.JSONDecodeError):
+            stats['skipped'] += 1
+    return stats
 
 
 def _predict_learned(img_bytes: bytes) -> tuple[str | None, float]:
