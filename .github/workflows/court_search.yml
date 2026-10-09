@@ -153,6 +153,16 @@ jobs:
           print(f'✅ 즉시 다운로드 파일 확정: {target} ({expected}건)')
           PY
 
+      - name: 새 러너 재조회 대상 분리
+        env:
+          CHUNK_TAG: ${{ matrix.tag }}
+        run: >-
+          python court-search/chunk_workbook.py retry-input
+          court-search/chunk-input.xlsx
+          "court-search/court-search-$CHUNK_TAG.xlsx"
+          "court-search/retry-input-$CHUNK_TAG.xlsx"
+          "court-search/retry-count-$CHUNK_TAG.txt"
+
       - name: ${{ matrix.start }}-${{ matrix.end }}번 즉시 다운로드 공개
         if: always()
         uses: actions/upload-artifact@v4
@@ -161,6 +171,17 @@ jobs:
           path: court-search/court-search-${{ matrix.tag }}.xlsx
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: 새 러너 재조회 요청 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: court-search-retry-input-${{ matrix.tag }}
+          path: |
+            court-search/retry-input-${{ matrix.tag }}.xlsx
+            court-search/retry-count-${{ matrix.tag }}.txt
+          if-no-files-found: error
+          retention-days: 1
 
       - name: 통과 캡차 학습 후보 확정
         if: always()
@@ -178,10 +199,128 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  search_retry:
+    name: 새 러너 재조회 ${{ matrix.start }}-${{ matrix.end }}
+    if: ${{ always() && needs.prepare.result == 'success' }}
+    needs: [prepare, search]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+
+    steps:
+      - name: 재조회 요청 확인
+        uses: actions/download-artifact@v4
+        with:
+          name: court-search-retry-input-${{ matrix.tag }}
+          path: court-search/retry-request
+
+      - name: 재조회 건수 확인
+        id: retry_count
+        env:
+          CHUNK_TAG: ${{ matrix.tag }}
+        run: |
+          count=$(cat "court-search/retry-request/retry-count-$CHUNK_TAG.txt")
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          echo "새 실행환경 재조회 대상: $count건"
+
+      - name: 기존 묶음 결과 받기
+        uses: actions/download-artifact@v4
+        with:
+          name: court-search-partial-${{ matrix.tag }}
+          path: court-search/retry-primary
+
+      - name: 체크아웃
+        if: ${{ steps.retry_count.outputs.count != '0' }}
+        uses: actions/checkout@v4
+        with:
+          clean: false
+
+      - name: Python 설정
+        if: ${{ steps.retry_count.outputs.count != '0' }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+          cache-dependency-path: court-search/requirements.txt
+
+      - name: 재조회 의존성 설치
+        if: ${{ steps.retry_count.outputs.count != '0' }}
+        run: |
+          pip install -r court-search/requirements.txt
+          playwright install chromium --with-deps
+
+      - name: 누적 캡차 모델 불러오기
+        if: ${{ steps.retry_count.outputs.count != '0' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: court-search/captcha-model
+          key: court-captcha-v2-${{ github.run_id }}-retry
+          restore-keys: |
+            court-captcha-v2-
+
+      - name: 실패 사건 새 실행환경 재조회
+        if: ${{ steps.retry_count.outputs.count != '0' }}
+        env:
+          CHUNK_TAG: ${{ matrix.tag }}
+          COURT_WORKERS: ${{ matrix.workers }}
+          OCR_TORCH_THREADS: '2'
+          CAPTCHA_DATA_DIR: captcha-retry-success
+          CAPTCHA_SEED_DIR: captcha-model
+          DEBUG_DIR: retry-debug
+          DEBUG_TABLES: '1'
+        run: >-
+          python -u court-search/search.py
+          "court-search/retry-request/retry-input-$CHUNK_TAG.xlsx"
+          court-search/retry-output.xlsx
+
+      - name: 최종 묶음 결과 확정
+        if: always()
+        env:
+          CHUNK_TAG: ${{ matrix.tag }}
+          RETRY_COUNT: ${{ steps.retry_count.outputs.count }}
+        run: |
+          mkdir -p court-search/final
+          primary="court-search/retry-primary/court-search-$CHUNK_TAG.xlsx"
+          final="court-search/final/court-search-$CHUNK_TAG.xlsx"
+          if [ "$RETRY_COUNT" != "0" ] && [ -f court-search/retry-output.xlsx ]; then
+            python court-search/chunk_workbook.py replace-retry \
+              "$primary" court-search/retry-output.xlsx "$final"
+          else
+            cp "$primary" "$final"
+          fi
+
+      - name: 최종 묶음 결과 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: court-search-final-${{ matrix.tag }}
+          path: court-search/final/court-search-${{ matrix.tag }}.xlsx
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: 재조회 통과 캡차 후보 확정
+        if: always()
+        run: |
+          mkdir -p court-search/captcha-retry-success/images
+          touch court-search/captcha-retry-success/labels.jsonl
+          echo "새 러너 통과 확인 샘플: $(wc -l < court-search/captcha-retry-success/labels.jsonl)건"
+
+      - name: 재조회 통과 캡차 후보 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: captcha-learning-retry-${{ matrix.tag }}
+          path: court-search/captcha-retry-success
+          if-no-files-found: error
+          retention-days: 7
+
   combine:
     name: 전체 결과 병합
     if: always()
-    needs: [prepare, search]
+    needs: [prepare, search, search_retry]
     runs-on: ubuntu-latest
     steps:
       - name: 체크아웃
@@ -198,7 +337,7 @@ jobs:
       - name: 완료된 20건 파일 받기
         uses: actions/download-artifact@v4
         with:
-          pattern: court-search-partial-*
+          pattern: court-search-final-*
           path: court-search/chunk-results
           merge-multiple: true
 
@@ -239,7 +378,7 @@ jobs:
       - name: 이번 실행의 통과 캡차 후보 받기
         uses: actions/download-artifact@v4
         with:
-          pattern: captcha-learning-candidates-*
+          pattern: captcha-learning-*
           path: court-search/captcha-candidates
 
       - name: 기존 실행 학습자료 최초 이관

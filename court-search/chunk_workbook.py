@@ -11,6 +11,7 @@ import openpyxl
 
 
 CHUNK_SIZE = 20
+RETRY_PREFIXES = ('조회실패', '조회보류')
 
 
 def input_rows(path: Path) -> tuple[list, list[tuple]]:
@@ -64,6 +65,74 @@ def write_slice(source: Path, target: Path, start: int, end: int):
     print(f"✅ 입력 묶음 생성: {target} ({start}-{end}, {len(selected)}건)")
 
 
+def write_retry_input(source: Path, result: Path, target: Path, count_file: Path):
+    """실패·보류된 사건만 새 Actions 러너에서 재조회할 입력으로 만든다."""
+    header, rows = input_rows(source)
+    result_book = openpyxl.load_workbook(result, read_only=True, data_only=True)
+    result_sheet = result_book.active
+    result_headers = [cell.value for cell in next(result_sheet.iter_rows())]
+    court_col = result_headers.index('법원')
+    case_col = result_headers.index('사건번호')
+    name_col = result_headers.index('사건명')
+    retry_keys = {
+        (str(row[court_col] or '').strip(), str(row[case_col] or '').strip())
+        for row in result_sheet.iter_rows(min_row=2, values_only=True)
+        if str(row[name_col] or '').startswith(RETRY_PREFIXES)
+    }
+    selected = [
+        row for row in rows
+        if (str(row[0] or '').strip(), str(row[1] or '').strip()) in retry_keys
+    ]
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = '재조회입력'
+    sheet.append(header)
+    for row in selected:
+        sheet.append(list(row))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(target)
+    count_file.write_text(str(len(selected)), encoding='utf-8')
+    print(f"✅ 새 러너 재조회 대상: {len(selected)}건")
+
+
+def replace_retry_results(primary: Path, retry: Path, target: Path):
+    """새 러너의 재조회 결과로 기존 실패 행만 교체하고 순서를 유지한다."""
+    workbook = openpyxl.load_workbook(primary)
+    sheet = workbook.active
+    headers = [cell.value for cell in sheet[1]]
+    court_col = headers.index('법원') + 1
+    case_col = headers.index('사건번호') + 1
+
+    retry_book = openpyxl.load_workbook(retry, read_only=True, data_only=True)
+    retry_sheet = retry_book.active
+    retry_headers = [cell.value for cell in next(retry_sheet.iter_rows())]
+    if retry_headers != headers:
+        raise ValueError('재조회 결과 열 구성이 기존 결과와 다릅니다.')
+    replacements = {
+        (str(row[court_col - 1] or '').strip(), str(row[case_col - 1] or '').strip()): row
+        for row in retry_sheet.iter_rows(min_row=2, values_only=True)
+    }
+
+    replaced = 0
+    for row_number in range(2, sheet.max_row + 1):
+        key = (
+            str(sheet.cell(row_number, court_col).value or '').strip(),
+            str(sheet.cell(row_number, case_col).value or '').strip(),
+        )
+        replacement = replacements.get(key)
+        if replacement is None:
+            continue
+        for column, value in enumerate(replacement, 1):
+            sheet.cell(row_number, column, value=value)
+        replaced += 1
+    if replaced != len(replacements):
+        raise ValueError(f'재조회 결과 교체 누락: {replaced}/{len(replacements)}')
+    target.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(target)
+    print(f"✅ 새 러너 재조회 결과 반영: {replaced}건")
+
+
 def combine_results(source_dir: Path, target: Path):
     files = sorted(source_dir.glob("court-search-*-*.xlsx"))
     if not files:
@@ -109,13 +178,28 @@ def main():
     combine_parser.add_argument("source_dir", type=Path)
     combine_parser.add_argument("output", type=Path)
 
+    retry_parser = subparsers.add_parser("retry-input")
+    retry_parser.add_argument("input", type=Path)
+    retry_parser.add_argument("result", type=Path)
+    retry_parser.add_argument("output", type=Path)
+    retry_parser.add_argument("count_file", type=Path)
+
+    replace_parser = subparsers.add_parser("replace-retry")
+    replace_parser.add_argument("primary", type=Path)
+    replace_parser.add_argument("retry", type=Path)
+    replace_parser.add_argument("output", type=Path)
+
     args = parser.parse_args()
     if args.command == "matrix":
         print_matrix(args.input)
     elif args.command == "slice":
         write_slice(args.input, args.output, args.start, args.end)
-    else:
+    elif args.command == "combine":
         combine_results(args.source_dir, args.output)
+    elif args.command == "retry-input":
+        write_retry_input(args.input, args.result, args.output, args.count_file)
+    else:
+        replace_retry_results(args.primary, args.retry, args.output)
 
 
 if __name__ == "__main__":

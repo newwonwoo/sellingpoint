@@ -16,6 +16,9 @@ export default async function handler(req, res) {
     '입력 파일 확인': '업로드한 사건번호 파일의 형식을 확인하고 있습니다.',
     '20건 단위 작업 계획': '사건번호를 20건 단위로 나누고 있습니다.',
     '중간 결과 파일 확정': '완료된 묶음의 엑셀 파일을 만들고 있습니다.',
+    '새 러너 재조회 대상 분리': '실패·보류 사건을 새 실행환경에서 다시 조회하도록 분리하고 있습니다.',
+    '실패 사건 새 실행환경 재조회': '기존 연결과 다른 새 실행환경에서 실패 사건을 다시 조회하고 있습니다.',
+    '최종 묶음 결과 확정': '새 실행환경의 재조회 결과를 기존 결과에 반영하고 있습니다.',
     '전체 결과 생성': '완료된 묶음 파일을 입력 순서대로 합치고 있습니다.',
     '전체 결과 엑셀 보관': '전체 결과를 웹앱에서 받을 수 있도록 보관하고 있습니다.',
     '기존 누적 캡차 모델 복원': '이전 실행에서 검증된 캡차 학습 모델을 불러오고 있습니다.',
@@ -68,7 +71,7 @@ export default async function handler(req, res) {
     let activeJobs = [];
     try {
       const jobsRes = await fetch(
-        `https://api.github.com/repos/${REPO}/actions/runs/${run.id}/jobs?per_page=20`,
+        `https://api.github.com/repos/${REPO}/actions/runs/${run.id}/jobs?per_page=100`,
         { headers: { Authorization: `token ${GITHUB_TOKEN}`, Accept: 'application/vnd.github.v3+json' } },
       );
       if (jobsRes.ok) {

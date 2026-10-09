@@ -368,7 +368,7 @@ export default function CourtSearchTab() {
   const partialResults = runStatus?.partialResults || [];
   const completedCases = runStatus?.completedCases || 0;
   const activeRanges = (runStatus?.activeJobs || [])
-    .filter((name) => name.startsWith("사건 "))
+    .filter((name) => name.startsWith("사건 ") || name.startsWith("새 러너 재조회 "))
     .join(", ");
   const statusMessage = runStatus?.status === "completed"
     ? (runStatus.conclusion === "success" ? "조회가 끝났습니다. 아래 결과 화면과 엑셀을 확인하세요." : "조회가 끝나지 않았습니다. GitHub 로그에서 실패 원인을 확인하세요.")
