@@ -267,8 +267,8 @@ jobs:
           CHUNK_TAG: ${{ matrix.tag }}
           COURT_WORKERS: ${{ matrix.workers }}
           OCR_TORCH_THREADS: '2'
-          CAPTCHA_DATA_DIR: captcha-retry-success
-          CAPTCHA_SEED_DIR: captcha-model
+          CAPTCHA_DATA_DIR: court-search/captcha-retry-success
+          CAPTCHA_SEED_DIR: court-search/captcha-model
           DEBUG_DIR: retry-debug
           DEBUG_TABLES: '1'
         run: >-

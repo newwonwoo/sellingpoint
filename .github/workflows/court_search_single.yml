@@ -82,8 +82,8 @@ jobs:
         env:
           COURT_WORKERS: '1'
           OCR_TORCH_THREADS: '2'
-          CAPTCHA_DATA_DIR: captcha-single-success
-          CAPTCHA_SEED_DIR: captcha-model
+          CAPTCHA_DATA_DIR: court-search/captcha-single-success
+          CAPTCHA_SEED_DIR: court-search/captcha-model
           DEBUG_DIR: single-debug
           DEBUG_TABLES: '1'
         run: >-
@@ -179,8 +179,8 @@ jobs:
         env:
           COURT_WORKERS: '1'
           OCR_TORCH_THREADS: '2'
-          CAPTCHA_DATA_DIR: captcha-single-retry-success
-          CAPTCHA_SEED_DIR: captcha-model
+          CAPTCHA_DATA_DIR: court-search/captcha-single-retry-success
+          CAPTCHA_SEED_DIR: court-search/captcha-model
           DEBUG_DIR: single-retry-debug
           DEBUG_TABLES: '1'
         run: >-
