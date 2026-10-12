@@ -466,6 +466,84 @@ async def wait_for_result_page(page: Page, timeout_ms: int = 12000) -> bool:
     return False
 
 
+async def search_form_visible(page: Page) -> bool:
+    """검색 입력 화면이 현재 페이지에서 실제로 표시되는지 확인한다."""
+    try:
+        locator = page.locator(SEL_COURT)
+        return await locator.count() > 0 and await locator.first.is_visible()
+    except Exception:
+        return False
+
+
+async def click_return_to_search(page: Page) -> str:
+    """결과 화면의 검색화면 버튼을 실제 마우스 클릭 방식으로 누른다."""
+    for frame in page.frames:
+        try:
+            candidates = frame.locator('button, input, a, [role="button"]')
+            count = min(await candidates.count(), 250)
+            for index in range(count):
+                candidate = candidates.nth(index)
+                if not await candidate.is_visible():
+                    continue
+                metadata = await candidate.evaluate("""
+                    element => ({
+                      label: String(
+                        element.innerText || element.textContent ||
+                        element.value || element.title ||
+                        element.getAttribute('aria-label') || ''
+                      ).replace(/\\s+/g, '').trim(),
+                      tag: element.tagName,
+                      id: element.id || ''
+                    })
+                """)
+                if metadata['label'] != '검색화면':
+                    continue
+                await candidate.click(timeout=4000)
+                return f"{metadata['tag']}#{metadata['id']}"
+        except Exception:
+            continue
+    return ''
+
+
+async def reuse_search_form(page: Page) -> bool:
+    """한 브라우저에서 다음 사건 검색 화면으로 복귀하는 실험 경로."""
+    if page.url == 'about:blank':
+        return False
+    started_at = asyncio.get_running_loop().time()
+    source = '입력화면 유지'
+
+    if not await search_form_visible(page):
+        source = await click_return_to_search(page)
+        if not source:
+            print('  재사용 불가: 검색화면 버튼을 찾지 못함 — 새로 접속합니다.')
+            return False
+        try:
+            await page.wait_for_selector(
+                SEL_COURT, state='visible', timeout=8000
+            )
+        except Exception:
+            elapsed = asyncio.get_running_loop().time() - started_at
+            print(
+                f'  재사용 실패: {source} 클릭 후 입력화면 미확인 '
+                f'({elapsed:.1f}초) — 새로 접속합니다.'
+            )
+            return False
+
+    try:
+        reload_button = page.locator(SEL_CAPTCHA_RELOAD)
+        if await reload_button.count() > 0 and await reload_button.first.is_visible():
+            await reload_button.first.click()
+            await page.wait_for_timeout(800)
+        await page.fill(SEL_CAPTCHA_INPUT, '')
+    except Exception as error:
+        print(f'  재사용 실패: 입력화면 초기화 오류 ({str(error)[:120]})')
+        return False
+
+    elapsed = asyncio.get_running_loop().time() - started_at
+    print(f'  ✅ 검색화면 재사용: {source} ({elapsed:.1f}초)')
+    return True
+
+
 def adaptive_scale_allowed(samples: list[dict]) -> bool:
     """최근 사건 처리 결과가 네 번째 워커를 열 만큼 안정적인지 판단한다."""
     if len(samples) < SCALE_SAMPLE_SIZE:
@@ -566,7 +644,8 @@ async def search_one(
     print(f"  조회: {court} / {case_no}")
 
     year, case_type, serial = parse_case_no(case_no)
-    page_ready = False
+    reuse_enabled = os.environ.get('COURT_REUSE_SEARCH_FORM') == '1'
+    page_ready = await reuse_search_form(page) if reuse_enabled else False
     stage = '사이트 접속'
     failure_reason = '재시도 한도 초과'
     connection_failures = 0

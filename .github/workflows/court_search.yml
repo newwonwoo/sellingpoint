@@ -128,8 +128,9 @@ jobs:
         env:
           INPUT_FILE: ${{ inputs.input_file }}
           PREPARE_ONLY: ${{ inputs.prepare_only }}
-          COURT_WORKERS: '3'
-          COURT_MAX_WORKERS: '4'
+          COURT_WORKERS: '1'
+          COURT_MAX_WORKERS: '1'
+          COURT_REUSE_SEARCH_FORM: ${{ contains(github.ref, 'single-reuse-enabled') && '1' || '0' }}
           OCR_TORCH_THREADS: '2'
           CAPTCHA_DATA_DIR: court-search/captcha-success
           CAPTCHA_SEED_DIR: court-search/captcha-model
@@ -313,8 +314,9 @@ jobs:
       - name: 새 실행기 전체 사건 재조회
         env:
           INPUT_FILE: ${{ inputs.input_file }}
-          COURT_WORKERS: '3'
-          COURT_MAX_WORKERS: '4'
+          COURT_WORKERS: '1'
+          COURT_MAX_WORKERS: '1'
+          COURT_REUSE_SEARCH_FORM: ${{ contains(github.ref, 'single-reuse-enabled') && '1' || '0' }}
           OCR_TORCH_THREADS: '2'
           CAPTCHA_DATA_DIR: court-search/captcha-success
           CAPTCHA_SEED_DIR: court-search/captcha-model
