@@ -216,7 +216,7 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--url", default=DEFAULT_URL)
     parser.add_argument("--timeout", type=float, default=8.0)
-    parser.add_argument("--browser-timeout", type=float, default=15.0)
+    parser.add_argument("--browser-timeout", type=float, default=30.0)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
 

@@ -117,6 +117,7 @@ jobs:
         run: >-
           "$COURT_PYTHON" -u court-search/connection_probe.py
           --timeout 8
+          --browser-timeout 30
           --output court-search/connection-diagnostic-batch-primary.json
 
       - name: 연결 진단 실패 결과 준비
@@ -333,6 +334,7 @@ jobs:
         run: >-
           "$COURT_PYTHON" -u court-search/connection_probe.py
           --timeout 8
+          --browser-timeout 30
           --output court-search/connection-diagnostic-batch-retry.json
 
       - name: 연결 진단 실패 결과 준비
