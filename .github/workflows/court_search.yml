@@ -9,6 +9,7 @@ on:
         options:
           - input.xlsx
           - test_input.xlsx
+          - test_input_20.xlsx
           - sample_input.xlsx
           - test_input_single.xlsx
           - test_input_user_cases.xlsx
@@ -54,7 +55,7 @@ jobs:
           INPUT_FILE: ${{ inputs.input_file }}
         run: |
           case "$INPUT_FILE" in
-            input.xlsx|test_input.xlsx|sample_input.xlsx|test_input_single.xlsx|test_input_user_cases.xlsx) ;;
+            input.xlsx|test_input.xlsx|test_input_20.xlsx|sample_input.xlsx|test_input_single.xlsx|test_input_user_cases.xlsx) ;;
             *) echo "허용되지 않은 입력 파일"; exit 1 ;;
           esac
           test -f "court-search/$INPUT_FILE"
