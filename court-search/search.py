@@ -466,78 +466,6 @@ async def wait_for_result_page(page: Page, timeout_ms: int = 12000) -> bool:
     return False
 
 
-async def search_form_visible(page: Page) -> bool:
-    """현재 WebSquare 검색 입력 화면이 실제로 표시되는지 확인한다."""
-    try:
-        locator = page.locator(SEL_COURT)
-        return await locator.count() > 0 and await locator.first.is_visible()
-    except Exception:
-        return False
-
-
-async def reuse_search_form(page: Page) -> bool:
-    """결과 화면에서 전체 페이지를 다시 열지 않고 검색 화면으로 복귀한다.
-
-    사이트 구조가 바뀌거나 복귀가 늦으면 False를 반환한다. 호출부는 기존의
-    TARGET_URL 이동으로 자동 대체하므로, 속도 최적화가 조회 안정성을 해치지
-    않는다.
-    """
-    if page.url == 'about:blank':
-        return False
-
-    if not await search_form_visible(page):
-        clicked = False
-        for frame in page.frames:
-            try:
-                clicked = await frame.evaluate(r"""
-                    () => {
-                      const visible = element => !!(
-                        element.offsetWidth || element.offsetHeight ||
-                        element.getClientRects().length
-                      );
-                      const candidates = document.querySelectorAll(
-                        'button, input, a, [role="button"]'
-                      );
-                      for (const element of candidates) {
-                        const label = String(
-                          element.innerText || element.textContent ||
-                          element.value || element.title ||
-                          element.getAttribute('aria-label') || ''
-                        ).replace(/\s+/g, '').trim();
-                        if (visible(element) && label === '검색화면') {
-                          element.click();
-                          return true;
-                        }
-                      }
-                      return false;
-                    }
-                """)
-                if clicked:
-                    break
-            except Exception:
-                continue
-        if not clicked:
-            return False
-        try:
-            await page.wait_for_selector(SEL_COURT, state='visible', timeout=4000)
-        except Exception:
-            return False
-
-    # 결과 화면에서 돌아오면 이전 캡차가 남을 수 있다. 새 사건에는 새 캡차를
-    # 사용하되, 새로고침 버튼이 없는 화면은 그대로 진행한다.
-    try:
-        reload_button = page.locator(SEL_CAPTCHA_RELOAD)
-        if await reload_button.count() > 0 and await reload_button.first.is_visible():
-            await reload_button.first.click()
-            await page.wait_for_timeout(250)
-        await page.fill(SEL_CAPTCHA_INPUT, '')
-    except Exception:
-        return False
-
-    print('  단계 검색화면 재사용')
-    return True
-
-
 def adaptive_scale_allowed(samples: list[dict]) -> bool:
     """최근 사건 처리 결과가 네 번째 워커를 열 만큼 안정적인지 판단한다."""
     if len(samples) < SCALE_SAMPLE_SIZE:
@@ -638,9 +566,7 @@ async def search_one(
     print(f"  조회: {court} / {case_no}")
 
     year, case_type, serial = parse_case_no(case_no)
-    # 첫 사건만 사이트 루트로 이동한다. 이후 사건은 결과 화면의 '검색화면'
-    # 버튼으로 돌아가 WebSquare 전체 초기화(실측 중앙값 약 7초)를 생략한다.
-    page_ready = await reuse_search_form(page)
+    page_ready = False
     stage = '사이트 접속'
     failure_reason = '재시도 한도 초과'
     connection_failures = 0
