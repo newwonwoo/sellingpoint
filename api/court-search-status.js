@@ -4,6 +4,22 @@
  * headSha가 있으면 해당 입력 커밋에서 시작한 실행만 찾는다.
  */
 
+const PAGE_SIZE = 100;
+const MAX_PAGES = 20;
+
+async function fetchAllPages(url, key, headers) {
+  const items = [];
+  for (let page = 1; page <= MAX_PAGES; page += 1) {
+    const separator = url.includes('?') ? '&' : '?';
+    const response = await fetch(`${url}${separator}per_page=${PAGE_SIZE}&page=${page}`, { headers });
+    if (!response.ok) return null;
+    const pageItems = (await response.json())[key] || [];
+    items.push(...pageItems);
+    if (pageItems.length < PAGE_SIZE) return items;
+  }
+  return null;
+}
+
 export default async function handler(req, res) {
   const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
   const REPO = process.env.GITHUB_REPO || 'newwonwoo/sellingpoint';
@@ -75,16 +91,21 @@ export default async function handler(req, res) {
     let stageMessage = '';
     let steps = [];
     let activeJobs = [];
+    let expectedCases = 0;
     try {
-      const jobsRes = await fetch(
-        `https://api.github.com/repos/${REPO}/actions/runs/${run.id}/jobs?per_page=100`,
-        { headers: { Authorization: `token ${GITHUB_TOKEN}`, Accept: 'application/vnd.github.v3+json' } },
+      const jobs = await fetchAllPages(
+        `https://api.github.com/repos/${REPO}/actions/runs/${run.id}/jobs`,
+        'jobs',
+        { Authorization: `token ${GITHUB_TOKEN}`, Accept: 'application/vnd.github.v3+json' },
       );
-      if (jobsRes.ok) {
-        const jobs = (await jobsRes.json()).jobs || [];
+      if (jobs) {
         activeJobs = jobs
           .filter((job) => job.status === 'in_progress')
           .map((job) => job.name);
+        expectedCases = jobs.reduce((maximum, candidate) => {
+          const match = String(candidate.name || '').match(/^사건 (\d+)-(\d+) 조회$/);
+          return match ? Math.max(maximum, Number(match[2])) : maximum;
+        }, 0);
         const job = jobs.find((candidate) => candidate.status === 'in_progress') || jobs.at(-1);
         steps = (job?.steps || []).map((step) => ({ name: step.name, status: step.status, conclusion: step.conclusion }));
         const active = job?.steps?.find((step) => step.status === 'in_progress');
@@ -99,12 +120,12 @@ export default async function handler(req, res) {
 
     let partialResults = [];
     try {
-      const artifactsRes = await fetch(
-        `https://api.github.com/repos/${REPO}/actions/runs/${run.id}/artifacts?per_page=100`,
-        { headers: { Authorization: `token ${GITHUB_TOKEN}`, Accept: 'application/vnd.github.v3+json' } },
+      const artifacts = await fetchAllPages(
+        `https://api.github.com/repos/${REPO}/actions/runs/${run.id}/artifacts`,
+        'artifacts',
+        { Authorization: `token ${GITHUB_TOKEN}`, Accept: 'application/vnd.github.v3+json' },
       );
-      if (artifactsRes.ok) {
-        const artifacts = (await artifactsRes.json()).artifacts || [];
+      if (artifacts) {
         partialResults = artifacts.flatMap((artifact) => {
           const match = artifact.name.match(/^court-search-partial-(\d+)-(\d+)$/);
           if (!match || artifact.expired) return [];
@@ -141,6 +162,7 @@ export default async function handler(req, res) {
       steps,
       activeJobs,
       partialResults,
+      expectedCases,
       completedCases: partialResults.reduce((sum, item) => sum + item.count, 0),
     });
 

@@ -227,6 +227,9 @@ jobs:
       matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
 
     steps:
+      - name: 체크아웃
+        uses: actions/checkout@v4
+
       - name: 재조회 요청 확인
         uses: actions/download-artifact@v4
         with:
@@ -247,12 +250,6 @@ jobs:
         with:
           name: court-search-partial-${{ matrix.tag }}
           path: court-search/retry-primary
-
-      - name: 체크아웃
-        if: ${{ steps.retry_count.outputs.count != '0' }}
-        uses: actions/checkout@v4
-        with:
-          clean: false
 
       - name: 고속 재조회환경 불러오기
         id: runtime-cache
@@ -392,7 +389,6 @@ jobs:
           PY
 
       - name: 전체 결과 엑셀 보관
-        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: court-search-result

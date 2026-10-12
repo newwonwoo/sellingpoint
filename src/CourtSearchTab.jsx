@@ -6,7 +6,6 @@
 import { useRef, useState, useEffect, useCallback } from "react";
 import * as XLSX from "xlsx-js-style";
 
-const XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
 const ACTIVE_RUN_STORAGE_KEY = "sellingpoint:court-search-active-run";
 
 const STATUS_LABEL = {
@@ -37,26 +36,11 @@ const SINGLE_FIELDS = [
   ["확정일", "확정일"],
 ];
 
-function decodeBase64(base64) {
-  const binary = atob(base64);
-  return Uint8Array.from(binary, (c) => c.charCodeAt(0));
-}
-
 function countInputCases(bytes) {
   const workbook = XLSX.read(bytes, { type: "array" });
   const sheet = workbook.Sheets[workbook.SheetNames[0]];
   const rows = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" });
   return rows.slice(1).filter((row) => String(row[0] || "").trim() && String(row[1] || "").trim()).length;
-}
-
-function downloadBase64File(file) {
-  const blob = new Blob([decodeBase64(file.content)], { type: XLSX_MIME });
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = file.filename;
-  anchor.click();
-  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function readSavedRun() {
@@ -166,16 +150,14 @@ export default function CourtSearchTab() {
   const [uploading, setUploading] = useState(false);
   const [runStatus, setRunStatus] = useState(null);
   const [polling, setPolling] = useState(false);
-  const [resultFile, setResultFile] = useState(null);
   const [singleResult, setSingleResult] = useState(null);
   const [expectedTotal, setExpectedTotal] = useState(0);
-  const [partialDownloading, setPartialDownloading] = useState("");
+  const [downloadingResult, setDownloadingResult] = useState(false);
   const [error, setError] = useState("");
 
-  const downloadResult = useCallback(async (runId, artifactId = "") => {
+  const downloadResult = useCallback(async (runId, scope = "all") => {
     if (!runId) return false;
-    const params = new URLSearchParams({ runId: String(runId), download: "1" });
-    if (artifactId) params.set("artifactId", String(artifactId));
+    const params = new URLSearchParams({ runId: String(runId), scope, download: "1" });
     try {
       const res = await fetch(`/api/court-search-result?${params}`);
       if (!res.ok) {
@@ -192,24 +174,6 @@ export default function CourtSearchTab() {
       anchor.download = filename;
       anchor.click();
       setTimeout(() => URL.revokeObjectURL(url), 1000);
-      setError("");
-      return true;
-    } catch (e) {
-      setError(e.message || "결과 파일을 불러오지 못했습니다.");
-      return false;
-    }
-  }, []);
-
-  const fetchBatchResult = useCallback(async (runId) => {
-    if (!runId) return false;
-    try {
-      const res = await fetch(`/api/court-search-result?runId=${encodeURIComponent(runId)}`);
-      const data = await res.json();
-      if (!res.ok) {
-        setError(data.error || "결과 파일을 불러오지 못했습니다.");
-        return false;
-      }
-      setResultFile(data);
       setError("");
       return true;
     } catch (e) {
@@ -267,13 +231,12 @@ export default function CourtSearchTab() {
         clearInterval(pollRef.current);
         if (data.conclusion === "success") {
           if (activeMode === "single" && !singleResultLoadedRef.current) await fetchSingleResult(data.runId);
-          if (activeMode === "batch") await fetchBatchResult(data.runId);
         }
       }
     } catch (e) {
       setError(e.message || "실행 상태를 불러오지 못했습니다.");
     }
-  }, [fetchBatchResult, fetchSingleResult]);
+  }, [fetchSingleResult]);
 
   useEffect(() => {
     if (!polling) return undefined;
@@ -311,7 +274,6 @@ export default function CourtSearchTab() {
     }
     setError("");
     setUploading(true);
-    setResultFile(null);
     setSingleResult(null);
     try {
       const inputBytes = await inputFile.arrayBuffer();
@@ -366,7 +328,6 @@ export default function CourtSearchTab() {
     }
     setError("");
     setUploading(true);
-    setResultFile(null);
     setSingleResult(null);
     singleResultLoadedRef.current = false;
     try {
@@ -396,20 +357,20 @@ export default function CourtSearchTab() {
     }
   };
 
-  const handleDownload = () => {
-    if (resultFile) downloadBase64File(resultFile);
-    else if (runStatus?.runId) downloadResult(runStatus.runId);
-  };
-
-  const handlePartialDownload = async (partial) => {
-    if (!runStatus?.runId || !partial?.artifactId) return;
-    setPartialDownloading(partial.artifactId);
+  const handleBatchDownload = async () => {
+    if (!runStatus?.runId) return;
+    const finished = runStatus.status === "completed";
+    if (!finished) {
+      const confirmed = window.confirm(
+        `현재까지 완료된 ${completedCases}건만 다운로드하시겠습니까?\n아직 진행 중인 사건은 포함되지 않습니다.`,
+      );
+      if (!confirmed) return;
+    }
+    setDownloadingResult(true);
     try {
-      await downloadResult(runStatus.runId, partial.artifactId);
-    } catch (e) {
-      setError(e.message || "중간 결과를 불러오지 못했습니다.");
+      await downloadResult(runStatus.runId, finished ? "all" : "completed");
     } finally {
-      setPartialDownloading("");
+      setDownloadingResult(false);
     }
   };
 
@@ -422,15 +383,15 @@ export default function CourtSearchTab() {
   };
 
   const isRunning = ["waiting", "queued", "in_progress"].includes(runStatus?.status);
-  const partialResults = runStatus?.partialResults || [];
   const completedCases = runStatus?.completedCases || 0;
+  const displayTotal = expectedTotal || runStatus?.expectedCases || 0;
   const activeRanges = (runStatus?.activeJobs || [])
     .filter((name) => mode === "single" || name.startsWith("사건 ") || name.startsWith("새 러너 재조회 "))
     .join(", ");
   const statusMessage = runStatus?.status === "completed"
     ? (runStatus.conclusion === "success"
       ? (mode === "single" ? "단건 조회가 끝났습니다. 아래 결과 화면을 확인하세요." : "일괄조회가 끝났습니다. 아래 결과 엑셀을 확인하세요.")
-      : "조회가 끝나지 않았습니다. GitHub 로그에서 실패 원인을 확인하세요.")
+      : "조회 실행이 종료되었습니다. 완료된 결과는 아래 버튼에서 한 파일로 받을 수 있습니다.")
     : runStatus?.stageMessage || runStatus?.message || STATUS_MESSAGE[runStatus?.status] || "";
 
   return (
@@ -488,46 +449,41 @@ export default function CourtSearchTab() {
           {isRunning && <div className="cs-progress"><div className="cs-spinner" /><span>
             {mode === "single"
               ? (activeRanges ? `현재 ${activeRanges}` : "단건 조회 실행을 준비하고 있습니다.")
-              : <>{expectedTotal ? `완료 파일 ${completedCases}/${expectedTotal}건` : `완료 파일 ${completedCases}건`}
+              : <>{displayTotal ? `완료 ${completedCases}/${displayTotal}건` : `완료 ${completedCases}건`}
                 {activeRanges ? ` · 현재 ${activeRanges}` : " · 다음 작업을 준비하고 있습니다."}</>}
           </span></div>}
 
-          {mode === "batch" && partialResults.length > 0 && (
+          {mode === "batch" && (completedCases > 0 || runStatus.status === "completed") && (
             <div className="cs-partial-results">
-              <div className="cs-partial-title">지금 다운로드 가능한 완료 결과</div>
-              {partialResults.map((partial) => (
-                <div className="cs-upload-row cs-partial-row" key={partial.artifactId}>
-                  <span className="badge ok">{partial.start}–{partial.end}번 완료</span>
-                  <span className="cs-time">{partial.count}건 · {partial.filename}</span>
-                  <button className="go" onClick={() => handlePartialDownload(partial)} disabled={partialDownloading === partial.artifactId}>
-                    {partialDownloading === partial.artifactId ? "받는 중…" : "📥 바로 다운로드"}
-                  </button>
-                </div>
-              ))}
+              <div className="cs-partial-title">결과 엑셀</div>
+              <div className="cs-upload-row cs-partial-row">
+                <span className="badge ok">
+                  {runStatus.status === "completed" ? "조회 종료" : `${completedCases}건 완료`}
+                </span>
+                <span className="cs-time">
+                  {runStatus.status === "completed"
+                    ? `20건 단위 결과를 합친 전체 파일${displayTotal ? ` · ${displayTotal}건` : ""}`
+                    : `현재까지 완료된 ${completedCases}건을 한 파일로 병합`}
+                </span>
+                <button
+                  className="go"
+                  onClick={handleBatchDownload}
+                  disabled={downloadingResult || (!completedCases && runStatus.status !== "completed")}
+                >
+                  {downloadingResult
+                    ? "파일 만드는 중…"
+                    : runStatus.status === "completed"
+                      ? "📥 전체 결과 다운로드"
+                      : `📥 현재까지 ${completedCases}건 다운로드`}
+                </button>
+              </div>
+              {isRunning && <p className="cs-hint">다운로드를 누르면 현재까지 완료된 묶음만 받을지 먼저 확인합니다.</p>}
             </div>
           )}
         </section>
       )}
 
       {mode === "single" && singleResult && <SingleResultView row={singleResult} />}
-
-      {mode === "batch" && resultFile && (
-        <section className="panel">
-          <div className="cs-step"><span className="cs-badge">3</span><span className="cs-label">결과 엑셀</span></div>
-          <div className="cs-upload-row"><span className="badge ok">결과 준비 완료</span><span className="cs-time">{resultFile.filename}</span><button className="go" onClick={handleDownload}>📥 다운로드</button></div>
-          <p className="cs-hint">완료된 일괄조회 결과 파일입니다.</p>
-        </section>
-      )}
-
-      {mode === "batch" && !resultFile && runStatus?.status === "completed" && runStatus?.conclusion === "success" && (
-        <section className="panel">
-          <div className="cs-step"><span className="cs-badge">3</span><span className="cs-label">결과 엑셀</span></div>
-          <div className="cs-upload-row">
-            <span className="badge ok">결과 준비 완료</span>
-            <button className="go" onClick={() => downloadResult(runStatus.runId)}>📥 전체 결과 다운로드</button>
-          </div>
-        </section>
-      )}
 
       {mode === "single" && !singleResult && runStatus?.status === "completed" && runStatus?.conclusion === "success" && (
         <section className="panel">
