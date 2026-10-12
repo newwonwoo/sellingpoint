@@ -1,0 +1,81 @@
+name: 단건조회 고속 실행환경 준비
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 매주 월요일 03:00 KST. 캐시가 있으면 접근 시각만 갱신하고,
+    # 만료됐으면 자동으로 다시 만든다.
+    - cron: '0 18 * * 0'
+  push:
+    branches: [main]
+    paths:
+      - court-search/requirements.txt
+      - .github/workflows/court_search_runtime.yml
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: court-search-runtime-v2
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Python·OCR 실행환경 캐시
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      COURT_PYTHON: court-search/.runtime-venv/bin/python
+      EASYOCR_MODEL_DIR: court-search/.easyocr-model
+      PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: /usr/bin/google-chrome
+    steps:
+      - name: 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 기존 고속 조회환경 확인
+        id: runtime-cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            court-search/.runtime-venv
+            court-search/.easyocr-model
+          key: court-search-runtime-v2-ubuntu-24.04-${{ hashFiles('court-search/requirements.txt') }}
+
+      - name: Python·OCR 실행환경 생성
+        if: ${{ steps.runtime-cache.outputs.cache-hit != 'true' }}
+        run: |
+          python3 -m venv court-search/.runtime-venv
+          "$COURT_PYTHON" -m pip install --upgrade pip
+          "$COURT_PYTHON" -m pip install -r court-search/requirements.txt
+          "$COURT_PYTHON" - <<'PY'
+          import easyocr
+          easyocr.Reader(
+              ['en'], gpu=False, verbose=False,
+              model_storage_directory='court-search/.easyocr-model',
+          )
+          PY
+
+      - name: 사전 설치 Chromium·OCR 동작 확인
+        run: |
+          test -x "$PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
+          "$PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH" --version
+          "$COURT_PYTHON" - <<'PY'
+          import asyncio
+          from playwright.async_api import async_playwright
+
+          async def main():
+              async with async_playwright() as playwright:
+                  browser = await playwright.chromium.launch(
+                      executable_path='/usr/bin/google-chrome',
+                      headless=True,
+                      args=['--no-sandbox', '--disable-dev-shm-usage'],
+                  )
+                  page = await browser.new_page()
+                  await page.set_content('<title>runtime-ready</title>')
+                  assert await page.title() == 'runtime-ready'
+                  await browser.close()
+
+          asyncio.run(main())
+          print('✅ 단건조회 고속 실행환경 준비 완료')
+          PY

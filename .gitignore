@@ -4,3 +4,5 @@ dist/
 .DS_Store
 court-search/__pycache__/
 court-search/captcha-success/
+court-search/.runtime-venv/
+court-search/.easyocr-model/

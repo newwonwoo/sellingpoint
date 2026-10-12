@@ -15,7 +15,8 @@ export default async function handler(req, res) {
     );
     if (!listRes.ok) return res.status(502).json({ error: '단건 결과 목록 조회 실패' });
     const artifacts = (await listRes.json()).artifacts || [];
-    const artifact = artifacts.find((item) => item.name === 'court-search-single-result' && !item.expired);
+    const artifact = artifacts.find((item) => item.name === 'court-search-single-result' && !item.expired)
+      || artifacts.find((item) => item.name === 'court-search-single-result-primary' && !item.expired);
     if (!artifact) return res.status(404).json({ error: '단건 JSON 결과가 아직 없습니다.' });
 
     const fileRes = await fetch(artifact.archive_download_url, {

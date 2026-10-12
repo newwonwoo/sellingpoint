@@ -792,10 +792,17 @@ async def main():
         max_workers=1, thread_name_prefix='captcha-ocr'
     )
     async with async_playwright() as p:
-        browser = await p.chromium.launch(
-            headless=HEADLESS,
-            args=['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled']
-        )
+        launch_options = {
+            'headless': HEADLESS,
+            'args': ['--no-sandbox', '--disable-dev-shm-usage', '--disable-blink-features=AutomationControlled'],
+        }
+        chromium_path = os.environ.get('PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH', '').strip()
+        if chromium_path:
+            if not Path(chromium_path).is_file():
+                raise RuntimeError(f'지정한 Chromium 실행파일 없음: {chromium_path}')
+            launch_options['executable_path'] = chromium_path
+            print(f'사전 설치 Chromium 사용: {chromium_path}')
+        browser = await p.chromium.launch(**launch_options)
 
         async def make_page(worker_id: int):
             context = await browser.new_context(

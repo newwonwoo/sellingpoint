@@ -10,7 +10,9 @@ export default async function handler(req, res) {
   }
 
   const messages = {
-    '조회 의존성 설치': '단건 조회용 브라우저와 캡차 인식기를 준비하고 있습니다.',
+    '고속 조회환경 불러오기': '미리 준비된 단건 조회환경을 불러오고 있습니다.',
+    '캐시 없을 때 조회환경 준비': '고속 조회환경이 없어 이번 한 번만 브라우저와 인식기를 준비하고 있습니다.',
+    '고속 조회환경 확인': '브라우저와 캡차 인식기 준비 상태를 확인하고 있습니다.',
     '누적 캡차 모델 불러오기': '검증된 누적 캡차 모델을 불러오고 있습니다.',
     '단건 JSON 입력 준비': '입력한 사건정보를 JSON 조회 요청으로 준비하고 있습니다.',
     '단건 사건검색': '법원 접속 → 캡차 처리 → 사건 결과 확인을 진행하고 있습니다.',
@@ -61,7 +63,10 @@ export default async function handler(req, res) {
       );
       if (artifactsRes.ok) {
         const artifacts = (await artifactsRes.json()).artifacts || [];
-        resultReady = artifacts.some((item) => item.name === 'court-search-single-result' && !item.expired);
+        resultReady = artifacts.some((item) => (
+          item.name === 'court-search-single-result'
+          || item.name === 'court-search-single-result-primary'
+        ) && !item.expired);
       }
     } catch {
       // 결과 준비 여부 조회 실패가 실행 상태 조회를 막지는 않는다.

@@ -44,7 +44,16 @@ def _get_reader():
     if _reader is None:
         _configure_runtime()
         import easyocr
-        _reader = easyocr.Reader(['en'], gpu=False, verbose=False)
+        model_dir = os.environ.get('EASYOCR_MODEL_DIR', '').strip()
+        options = {}
+        if model_dir:
+            options = {
+                'model_storage_directory': model_dir,
+                # 고속 런타임 캐시에 모델이 없으면 조용히 다시 내려받지 않고
+                # 준비 단계에서 즉시 실패시켜 캐시를 재생성한다.
+                'download_enabled': False,
+            }
+        _reader = easyocr.Reader(['en'], gpu=False, verbose=False, **options)
     return _reader
 
 

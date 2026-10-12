@@ -26,10 +26,15 @@ permissions:
   contents: read
   actions: read
 
+env:
+  COURT_PYTHON: court-search/.runtime-venv/bin/python
+  EASYOCR_MODEL_DIR: court-search/.easyocr-model
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: /usr/bin/google-chrome
+
 jobs:
   primary:
     name: 단건 조회
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     outputs:
       retry_required: ${{ steps.inspect.outputs.retry_required }}
@@ -37,17 +42,34 @@ jobs:
       - name: 체크아웃
         uses: actions/checkout@v4
 
-      - name: Python 설정
-        uses: actions/setup-python@v5
+      - name: 고속 조회환경 불러오기
+        id: runtime-cache
+        uses: actions/cache/restore@v4
         with:
-          python-version: '3.11'
-          cache: 'pip'
-          cache-dependency-path: court-search/requirements.txt
+          path: |
+            court-search/.runtime-venv
+            court-search/.easyocr-model
+          key: court-search-runtime-v2-ubuntu-24.04-${{ hashFiles('court-search/requirements.txt') }}
 
-      - name: 조회 의존성 설치
+      - name: 캐시 없을 때 조회환경 준비
+        if: ${{ steps.runtime-cache.outputs.cache-hit != 'true' }}
         run: |
-          pip install -r court-search/requirements.txt
-          playwright install chromium --with-deps
+          python3 -m venv court-search/.runtime-venv
+          "$COURT_PYTHON" -m pip install --upgrade pip
+          "$COURT_PYTHON" -m pip install -r court-search/requirements.txt
+          "$COURT_PYTHON" - <<'PY'
+          import easyocr
+          easyocr.Reader(
+              ['en'], gpu=False, verbose=False,
+              model_storage_directory='court-search/.easyocr-model',
+          )
+          PY
+
+      - name: 고속 조회환경 확인
+        run: |
+          test -x "$COURT_PYTHON"
+          test -x "$PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
+          "$COURT_PYTHON" -c "import easyocr, openpyxl, playwright; print('고속 조회환경 준비 완료')"
 
       - name: 누적 캡차 모델 불러오기
         uses: actions/cache/restore@v4
@@ -63,7 +85,7 @@ jobs:
           CASE_NO: ${{ inputs.case_no }}
           PARTY: ${{ inputs.party }}
         run: |
-          python - <<'PY'
+          "$COURT_PYTHON" - <<'PY'
           import json, os
           from pathlib import Path
           payload = {
@@ -87,14 +109,14 @@ jobs:
           DEBUG_DIR: single-debug
           DEBUG_TABLES: '1'
         run: >-
-          python -u court-search/search.py
+          "$COURT_PYTHON" -u court-search/search.py
           court-search/single-input.json
           court-search/single-result.json
 
       - name: 단건 결과 확인
         id: inspect
         run: |
-          python - <<'PY' >> "$GITHUB_OUTPUT"
+          "$COURT_PYTHON" - <<'PY' >> "$GITHUB_OUTPUT"
           import json
           from pathlib import Path
           data = json.loads(Path('court-search/single-result.json').read_text(encoding='utf-8'))
@@ -110,6 +132,15 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: court-search-single-primary
+          path: court-search/single-result.json
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: 단건 성공 JSON 즉시 공개
+        if: ${{ steps.inspect.outputs.retry_required != 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: court-search-single-result-primary
           path: court-search/single-result.json
           if-no-files-found: error
           retention-days: 7
@@ -133,23 +164,40 @@ jobs:
     name: 단건 새 러너 재조회
     needs: primary
     if: ${{ needs.primary.outputs.retry_required == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - name: 체크아웃
         uses: actions/checkout@v4
 
-      - name: Python 설정
-        uses: actions/setup-python@v5
+      - name: 고속 조회환경 불러오기
+        id: runtime-cache
+        uses: actions/cache/restore@v4
         with:
-          python-version: '3.11'
-          cache: 'pip'
-          cache-dependency-path: court-search/requirements.txt
+          path: |
+            court-search/.runtime-venv
+            court-search/.easyocr-model
+          key: court-search-runtime-v2-ubuntu-24.04-${{ hashFiles('court-search/requirements.txt') }}
 
-      - name: 재조회 의존성 설치
+      - name: 캐시 없을 때 조회환경 준비
+        if: ${{ steps.runtime-cache.outputs.cache-hit != 'true' }}
         run: |
-          pip install -r court-search/requirements.txt
-          playwright install chromium --with-deps
+          python3 -m venv court-search/.runtime-venv
+          "$COURT_PYTHON" -m pip install --upgrade pip
+          "$COURT_PYTHON" -m pip install -r court-search/requirements.txt
+          "$COURT_PYTHON" - <<'PY'
+          import easyocr
+          easyocr.Reader(
+              ['en'], gpu=False, verbose=False,
+              model_storage_directory='court-search/.easyocr-model',
+          )
+          PY
+
+      - name: 고속 조회환경 확인
+        run: |
+          test -x "$COURT_PYTHON"
+          test -x "$PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
+          "$COURT_PYTHON" -c "import easyocr, openpyxl, playwright; print('고속 재조회환경 준비 완료')"
 
       - name: 누적 캡차 모델 불러오기
         uses: actions/cache/restore@v4
@@ -165,7 +213,7 @@ jobs:
           CASE_NO: ${{ inputs.case_no }}
           PARTY: ${{ inputs.party }}
         run: |
-          python - <<'PY'
+          "$COURT_PYTHON" - <<'PY'
           import json, os
           from pathlib import Path
           Path('court-search/single-input.json').write_text(json.dumps({
@@ -184,7 +232,7 @@ jobs:
           DEBUG_DIR: single-retry-debug
           DEBUG_TABLES: '1'
         run: >-
-          python -u court-search/search.py
+          "$COURT_PYTHON" -u court-search/search.py
           court-search/single-input.json
           court-search/single-retry-result.json
 
