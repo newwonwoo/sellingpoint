@@ -135,6 +135,16 @@ SEL_CAPTCHA_IMG    = '#mf_ssgoTopMainTab_contents_content1_body_img_captcha'
 SEL_CAPTCHA_RELOAD = '#mf_ssgoTopMainTab_contents_content1_body_btn_reloadCaptcha'
 SEL_SEARCH  = '#mf_ssgoTopMainTab_contents_content1_body_btn_srchCs'
 
+# 일괄 조회는 검증된 3워커로 시작하고, 최근 처리 속도와 성공률이 안정적인
+# 경우에만 네 번째 워커를 연다. 법원 사이트에 같은 실행기에서 5개 이상의
+# 동시 연결을 만들지 않도록 코드에서도 상한을 고정한다.
+MAX_BATCH_WORKERS = 4
+SCALE_SAMPLE_SIZE = 15
+SCALE_MAX_AVERAGE_SECONDS = 25.0
+RETIRE_SAMPLE_SIZE = 10
+RETIRE_MIN_CONNECTION_FAILURES = 2
+RETIRE_MAX_AVERAGE_SECONDS = 35.0
+
 
 # ──────────────────────────────────────────────
 # 입력 읽기 (일괄=xlsx, 단건=json)
@@ -456,6 +466,143 @@ async def wait_for_result_page(page: Page, timeout_ms: int = 12000) -> bool:
     return False
 
 
+async def search_form_visible(page: Page) -> bool:
+    """현재 WebSquare 검색 입력 화면이 실제로 표시되는지 확인한다."""
+    try:
+        locator = page.locator(SEL_COURT)
+        return await locator.count() > 0 and await locator.first.is_visible()
+    except Exception:
+        return False
+
+
+async def reuse_search_form(page: Page) -> bool:
+    """결과 화면에서 전체 페이지를 다시 열지 않고 검색 화면으로 복귀한다.
+
+    사이트 구조가 바뀌거나 복귀가 늦으면 False를 반환한다. 호출부는 기존의
+    TARGET_URL 이동으로 자동 대체하므로, 속도 최적화가 조회 안정성을 해치지
+    않는다.
+    """
+    if page.url == 'about:blank':
+        return False
+
+    if not await search_form_visible(page):
+        clicked = False
+        for frame in page.frames:
+            try:
+                clicked = await frame.evaluate(r"""
+                    () => {
+                      const visible = element => !!(
+                        element.offsetWidth || element.offsetHeight ||
+                        element.getClientRects().length
+                      );
+                      const candidates = document.querySelectorAll(
+                        'button, input, a, [role="button"]'
+                      );
+                      for (const element of candidates) {
+                        const label = String(
+                          element.innerText || element.textContent ||
+                          element.value || element.title ||
+                          element.getAttribute('aria-label') || ''
+                        ).replace(/\s+/g, '').trim();
+                        if (visible(element) && label === '검색화면') {
+                          element.click();
+                          return true;
+                        }
+                      }
+                      return false;
+                    }
+                """)
+                if clicked:
+                    break
+            except Exception:
+                continue
+        if not clicked:
+            return False
+        try:
+            await page.wait_for_selector(SEL_COURT, state='visible', timeout=4000)
+        except Exception:
+            return False
+
+    # 결과 화면에서 돌아오면 이전 캡차가 남을 수 있다. 새 사건에는 새 캡차를
+    # 사용하되, 새로고침 버튼이 없는 화면은 그대로 진행한다.
+    try:
+        reload_button = page.locator(SEL_CAPTCHA_RELOAD)
+        if await reload_button.count() > 0 and await reload_button.first.is_visible():
+            await reload_button.first.click()
+            await page.wait_for_timeout(250)
+        await page.fill(SEL_CAPTCHA_INPUT, '')
+    except Exception:
+        return False
+
+    print('  단계 검색화면 재사용')
+    return True
+
+
+def adaptive_scale_allowed(samples: list[dict]) -> bool:
+    """최근 사건 처리 결과가 네 번째 워커를 열 만큼 안정적인지 판단한다."""
+    if len(samples) < SCALE_SAMPLE_SIZE:
+        return False
+    recent = samples[-SCALE_SAMPLE_SIZE:]
+    connection_failures = sum(sample['connection_failure'] for sample in recent)
+    completed = sum(sample['success'] for sample in recent)
+    average = sum(sample['duration'] for sample in recent) / len(recent)
+    return (
+        connection_failures == 0
+        and completed >= SCALE_SAMPLE_SIZE - 2
+        and average <= SCALE_MAX_AVERAGE_SECONDS
+    )
+
+
+def adaptive_retire_required(samples: list[dict]) -> bool:
+    """증설 뒤 접속이나 전체 처리 속도가 나빠지면 네 번째 워커를 회수한다."""
+    if len(samples) < RETIRE_SAMPLE_SIZE:
+        return False
+    recent = samples[-RETIRE_SAMPLE_SIZE:]
+    connection_failures = sum(sample['connection_failure'] for sample in recent)
+    average = sum(sample['duration'] for sample in recent) / len(recent)
+    return (
+        connection_failures >= RETIRE_MIN_CONNECTION_FAILURES
+        or average > RETIRE_MAX_AVERAGE_SECONDS
+    )
+
+
+def record_adaptive_health(state: dict, result: dict, duration: float):
+    """사건 단위 상태를 기록하고 최대 네 번째 워커만 활성화한다."""
+    if not state['enabled']:
+        return
+    name = str(result.get('사건명', ''))
+    connection_failure = name.startswith((
+        '조회실패: 법원 사이트', '조회보류: 법원 사이트'
+    ))
+    state['samples'].append({
+        'success': bool(name) and not name.startswith(('조회실패', '조회보류')),
+        'connection_failure': connection_failure,
+        'duration': duration,
+    })
+    # 판단에는 최근 구간만 필요하다. 장시간 실행에서도 목록이 커지지 않는다.
+    del state['samples'][:-30]
+
+    if (
+        not state['scale_event'].is_set()
+        and not state['extra_worker_retired']
+        and adaptive_scale_allowed(state['samples'])
+    ):
+        state['scale_event'].set()
+        recent = state['samples'][-SCALE_SAMPLE_SIZE:]
+        average = sum(sample['duration'] for sample in recent) / len(recent)
+        print(
+            f"\n⚡ 최근 {SCALE_SAMPLE_SIZE}건 평균 {average:.1f}초, 접속 안정 확인 — "
+            "4번째 워커를 투입합니다."
+        )
+    elif (
+        state['scale_event'].is_set()
+        and not state['extra_worker_retired']
+        and adaptive_retire_required(state['samples'])
+    ):
+        state['extra_worker_retired'] = True
+        print('\n↘ 접속 또는 처리 속도 저하 감지 — 4번째 워커를 회수합니다.')
+
+
 async def diagnose_site_connection(page: Page):
     """전체 접속 실패 시 DNS와 브라우저 밖 HTTP 경로를 한 번만 진단한다."""
     host = urlparse(TARGET_URL).hostname
@@ -491,7 +638,9 @@ async def search_one(
     print(f"  조회: {court} / {case_no}")
 
     year, case_type, serial = parse_case_no(case_no)
-    page_ready = False
+    # 첫 사건만 사이트 루트로 이동한다. 이후 사건은 결과 화면의 '검색화면'
+    # 버튼으로 돌아가 WebSquare 전체 초기화(실측 중앙값 약 7초)를 생략한다.
+    page_ready = await reuse_search_form(page)
     stage = '사이트 접속'
     failure_reason = '재시도 한도 초과'
     connection_failures = 0
@@ -896,16 +1045,33 @@ async def main():
             f" (제외 {seed_stats['skipped']}건)"
         )
 
-    # 입력 건수를 먼저 확인하고 최대 3개 워커가 공용 큐에서 한 건씩
-    # 가져간다. 먼저 끝난 워커가 다음 순번을 즉시 이어받는다.
+    # 입력 건수를 먼저 확인하고 기본 3개 워커가 공용 큐에서 한 건씩
+    # 가져간다. 상태가 안정적일 때만 네 번째 워커를 추가한다.
     try:
         worker_count = int(os.environ.get('COURT_WORKERS', '3'))
     except ValueError:
         worker_count = 3
     worker_count = max(1, min(worker_count, len(cases))) if cases else 1
+    try:
+        requested_max_workers = int(
+            os.environ.get('COURT_MAX_WORKERS', str(worker_count))
+        )
+    except ValueError:
+        requested_max_workers = worker_count
+    max_worker_count = max(
+        worker_count,
+        min(MAX_BATCH_WORKERS, requested_max_workers, len(cases))
+    ) if cases else worker_count
     if prepare_only:
         worker_count = 1
-    print(f"조회 워커 {worker_count}개로 실행합니다.")
+        max_worker_count = 1
+    if max_worker_count > worker_count:
+        print(
+            f"조회 워커 {worker_count}개로 시작하며 접속 상태가 안정적이면 "
+            f"최대 {max_worker_count}개로 확대합니다."
+        )
+    else:
+        print(f"조회 워커 {worker_count}개로 실행합니다.")
 
     results = [{} for _ in cases]
     partial_publisher = PartialResultPublisher(results)
@@ -915,8 +1081,14 @@ async def main():
         'event': asyncio.Event(),
         'diagnosed': False,
     }
+    adaptive_state = {
+        'enabled': max_worker_count > worker_count,
+        'samples': [],
+        'scale_event': asyncio.Event(),
+        'extra_worker_retired': False,
+    }
     # EasyOCR 모델은 하나만 메모리에 올린다. 캡차 요청은 이 전용 실행부에
-    # 순서대로 들어가며 브라우저 3개는 네트워크/결과 대기를 계속 병렬 수행한다.
+    # 순서대로 들어가며 브라우저 워커는 네트워크/결과 대기를 병렬 수행한다.
     ocr_executor = ThreadPoolExecutor(
         max_workers=1, thread_name_prefix='captcha-ocr'
     )
@@ -949,7 +1121,7 @@ async def main():
             page.on('dialog', handle_dialog)
             return context, page
 
-        pages = [await make_page(worker_id) for worker_id in range(worker_count)]
+        pages = [await make_page(worker_id) for worker_id in range(max_worker_count)]
 
         async def run_batch(indices, retry=False):
             """인덱스 목록을 워커에 나눠 실행하고 결과 순서는 원본을 유지한다."""
@@ -963,6 +1135,8 @@ async def main():
                 while True:
                     if connection_circuit['event'].is_set():
                         return
+                    if worker_id >= worker_count and adaptive_state['extra_worker_retired']:
+                        return
                     try:
                         idx = queue.get_nowait()
                     except asyncio.QueueEmpty:
@@ -973,6 +1147,7 @@ async def main():
                     else:
                         prefix = f"{idx + 1}/{len(cases)}"
                     print(f"[{prefix} 워커 {worker_id + 1}]", end=' ')
+                    started_at = asyncio.get_running_loop().time()
                     try:
                         results[idx] = await search_one(
                             page,
@@ -983,14 +1158,47 @@ async def main():
                             ocr_executor,
                             connection_circuit,
                         )
+                        record_adaptive_health(
+                            adaptive_state,
+                            results[idx],
+                            asyncio.get_running_loop().time() - started_at,
+                        )
                         if not retry:
                             await partial_publisher.publish_ready()
                     finally:
                         queue.task_done()
 
-            await asyncio.gather(*[
-                worker(worker_id, page) for worker_id, (_, page) in enumerate(pages)
-            ])
+            primary_tasks = [
+                asyncio.create_task(worker(worker_id, pages[worker_id][1]))
+                for worker_id in range(worker_count)
+            ]
+            batch_finished = asyncio.Event()
+
+            async def adaptive_worker(worker_id, page):
+                scale_wait = asyncio.create_task(adaptive_state['scale_event'].wait())
+                finish_wait = asyncio.create_task(batch_finished.wait())
+                _, pending = await asyncio.wait(
+                    (scale_wait, finish_wait),
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                if (
+                    batch_finished.is_set()
+                    or adaptive_state['extra_worker_retired']
+                    or queue.empty()
+                ):
+                    return
+                await worker(worker_id, page)
+
+            extra_tasks = [
+                asyncio.create_task(adaptive_worker(worker_id, pages[worker_id][1]))
+                for worker_id in range(worker_count, max_worker_count)
+            ]
+            await asyncio.gather(*primary_tasks)
+            batch_finished.set()
+            await asyncio.gather(*extra_tasks)
 
         await run_batch(range(len(cases)))
 

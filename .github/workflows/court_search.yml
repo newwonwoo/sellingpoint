@@ -128,6 +128,7 @@ jobs:
           INPUT_FILE: ${{ inputs.input_file }}
           PREPARE_ONLY: ${{ inputs.prepare_only }}
           COURT_WORKERS: '3'
+          COURT_MAX_WORKERS: '4'
           OCR_TORCH_THREADS: '2'
           CAPTCHA_DATA_DIR: court-search/captcha-success
           CAPTCHA_SEED_DIR: court-search/captcha-model
@@ -312,6 +313,7 @@ jobs:
         env:
           INPUT_FILE: ${{ inputs.input_file }}
           COURT_WORKERS: '3'
+          COURT_MAX_WORKERS: '4'
           OCR_TORCH_THREADS: '2'
           CAPTCHA_DATA_DIR: court-search/captcha-success
           CAPTCHA_SEED_DIR: court-search/captcha-model
