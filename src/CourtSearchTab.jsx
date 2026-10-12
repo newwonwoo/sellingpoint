@@ -20,6 +20,23 @@ const CONCLUSION_LABEL = {
   failure: "❌ 실패",
   cancelled: "⛔ 취소됨",
 };
+const SINGLE_OUTCOME = {
+  success: {
+    label: "✅ 조회 성공",
+    badgeClass: "ok",
+    message: "단건 조회가 끝났습니다. 아래 결과 화면을 확인하세요.",
+  },
+  failure: {
+    label: "❌ 조회 실패",
+    badgeClass: "fail",
+    message: "단건 조회에 실패했습니다. 아래 결과 화면에서 실패 사유를 확인하세요.",
+  },
+  notFound: {
+    label: "⚠️ 사건 없음",
+    badgeClass: "warn",
+    message: "입력한 조건으로 확인되는 사건이 없습니다. 사건번호와 당사자명을 확인하세요.",
+  },
+};
 const STATUS_MESSAGE = {
   waiting: "업로드한 사건번호를 GitHub Actions 실행에 등록하고 있습니다.",
   queued: "실행 대기열에 등록되었습니다. 조회 작업이 시작되기를 기다리고 있습니다.",
@@ -67,6 +84,14 @@ function valueOf(row, key) {
   return value == null || String(value).trim() === "" ? "—" : String(value);
 }
 
+function singleOutcomeOf(row) {
+  if (!row) return null;
+  const name = String(row["사건명"] || "").trim();
+  if (name.startsWith("조회실패") || name.startsWith("조회보류")) return "failure";
+  if (name === "사건없음") return "notFound";
+  return "success";
+}
+
 function ProgressTable({ row }) {
   const items = [1, 2, 3]
     .map((i) => ({
@@ -98,11 +123,46 @@ function ProgressTable({ row }) {
   );
 }
 
+function DiagnosticFlow({ runStatus, singleOutcome }) {
+  const diagnostic = runStatus?.diagnosticStatus || "pending";
+  const currentStep = runStatus?.currentStep || "";
+  const lookupActive = /단건 사건검색|단건 새 실행환경 재조회/.test(currentStep);
+  const lookupAttempted = (runStatus?.lookupAttempts || []).some((attempt) => (
+    attempt.conclusion !== "skipped"
+    && (attempt.status === "in_progress" || attempt.status === "completed")
+  ));
+  const lookupDone = lookupAttempted && !lookupActive;
+  const lookupBlocked = runStatus?.status === "completed" && !lookupAttempted;
+  const resultDone = runStatus?.status === "completed" && Boolean(singleOutcome);
+  const diagnosticText = diagnostic === "success"
+    ? "연결 진단 통과"
+    : diagnostic === "failure"
+      ? "연결 실패 · 새 환경 확인"
+      : diagnostic === "in_progress"
+        ? "연결 진단 중"
+        : "연결 진단 대기";
+  return (
+    <div className="cs-diagnostic-flow" aria-label="단건 조회 진행 단계">
+      <div className={`cs-flow-item ${diagnostic}`}><strong>1</strong><span>{diagnosticText}</span></div>
+      <div className={`cs-flow-line ${diagnostic === "success" ? "done" : ""}`} />
+      <div className={`cs-flow-item ${lookupDone ? "success" : lookupActive ? "in_progress" : lookupBlocked ? "failure" : "pending"}`}><strong>2</strong><span>{lookupDone ? "사건조회 완료" : lookupActive ? "사건조회 중" : lookupBlocked ? "진단 실패로 미실행" : "사건조회 대기"}</span></div>
+      <div className={`cs-flow-line ${lookupDone ? "done" : ""}`} />
+      <div className={`cs-flow-item ${resultDone ? (singleOutcome === "failure" ? "failure" : "success") : "pending"}`}><strong>3</strong><span>{resultDone ? "결과 확인" : "결과 대기"}</span></div>
+    </div>
+  );
+}
+
 function SingleResultView({ row }) {
   if (!row) return null;
+  const outcome = singleOutcomeOf(row);
   return (
     <section className="panel cs-result-panel">
       <div className="cs-result-heading">조회 결과</div>
+      {outcome !== "success" && (
+        <div className={`cs-result-alert ${outcome === "failure" ? "fail" : "warn"}`}>
+          {SINGLE_OUTCOME[outcome].message}
+        </div>
+      )}
       <div className="cs-result-section">
         <div className="cs-result-title">기본내용 ({valueOf(row, "법원")})</div>
         <div className="cs-basic-grid">
@@ -388,10 +448,19 @@ export default function CourtSearchTab() {
   const activeRanges = (runStatus?.activeJobs || [])
     .filter((name) => mode === "single" || name.startsWith("사건 ") || name.startsWith("새 러너 재조회 "))
     .join(", ");
+  const singleOutcome = singleOutcomeOf(singleResult);
+  const completedSingleStatus = mode === "single" && runStatus?.status === "completed"
+    ? (singleOutcome ? SINGLE_OUTCOME[singleOutcome] : {
+      label: "결과 확인 중…",
+      badgeClass: "info",
+      message: "최종 조회 결과를 확인하고 있습니다.",
+    })
+    : null;
   const statusMessage = runStatus?.status === "completed"
-    ? (runStatus.conclusion === "success"
-      ? (mode === "single" ? "단건 조회가 끝났습니다. 아래 결과 화면을 확인하세요." : "일괄조회가 끝났습니다. 아래 결과 엑셀을 확인하세요.")
+    ? (completedSingleStatus?.message || (runStatus.conclusion === "success"
+      ? "일괄조회가 끝났습니다. 아래 결과 엑셀을 확인하세요."
       : "조회 실행이 종료되었습니다. 완료된 결과는 아래 버튼에서 한 파일로 받을 수 있습니다.")
+    )
     : runStatus?.stageMessage || runStatus?.message || STATUS_MESSAGE[runStatus?.status] || "";
 
   return (
@@ -411,8 +480,11 @@ export default function CourtSearchTab() {
             <label><span>당사자명</span><input value={singleCase.party} placeholder="예: 주택" onChange={(e) => setSingleCase((v) => ({ ...v, party: e.target.value }))} /></label>
           </div>
           <div className="cs-upload-row cs-single-actions">
-            <button className="go" onClick={handleSingleRun} disabled={uploading || isRunning}>{uploading ? "등록 중…" : isRunning ? "조회 중…" : "조회 시작"}</button>
-            <span className="cs-hint">결과는 캡처 화면과 같은 기본내용·진행내용·관련사건·당사자 영역으로 표시됩니다.</span>
+            <button className="go cs-diagnostic-start" onClick={handleSingleRun} disabled={uploading || isRunning}>
+              <span className="cs-diagnostic-icon" aria-hidden="true">⌁</span>
+              <span>{uploading ? "진단 실행 등록 중…" : isRunning ? "연결 진단·조회 진행 중…" : "연결 진단 후 조회 시작"}</span>
+            </button>
+            <span className="cs-hint">현재 실행환경에서 법원 사이트 연결을 먼저 확인하고, 통과한 경우에만 같은 환경에서 사건을 조회합니다.</span>
           </div>
         </section>
       ) : (
@@ -437,9 +509,10 @@ export default function CourtSearchTab() {
       {runStatus && runStatus.status !== "none" && (
         <section className="panel">
           <div className="cs-step"><span className="cs-badge">2</span><span className="cs-label">진행 상태</span></div>
+          {mode === "single" && <DiagnosticFlow runStatus={runStatus} singleOutcome={singleOutcome} />}
           <div className="cs-status-row">
-            <span className={`badge ${runStatus.status === "completed" ? (runStatus.conclusion === "success" ? "ok" : "warn") : "info"}`}>
-              {runStatus.status === "completed" ? CONCLUSION_LABEL[runStatus.conclusion] || runStatus.conclusion : STATUS_LABEL[runStatus.status] || runStatus.status}
+            <span className={`badge ${runStatus.status === "completed" ? (completedSingleStatus?.badgeClass || (runStatus.conclusion === "success" ? "ok" : runStatus.conclusion === "failure" ? "fail" : "warn")) : "info"}`}>
+              {runStatus.status === "completed" ? completedSingleStatus?.label || CONCLUSION_LABEL[runStatus.conclusion] || runStatus.conclusion : STATUS_LABEL[runStatus.status] || runStatus.status}
             </span>
             {(runStatus.startedAt || runStatus.queuedAt) && <span className="cs-time">시작: {new Date(runStatus.startedAt || runStatus.queuedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}</span>}
             {runStatus.currentStep && <span className="cs-time">현재 단계: {runStatus.currentStep}</span>}
@@ -485,11 +558,11 @@ export default function CourtSearchTab() {
 
       {mode === "single" && singleResult && <SingleResultView row={singleResult} />}
 
-      {mode === "single" && !singleResult && runStatus?.status === "completed" && runStatus?.conclusion === "success" && (
+      {mode === "single" && !singleResult && runStatus?.status === "completed" && (
         <section className="panel">
           <div className="cs-step"><span className="cs-badge">3</span><span className="cs-label">화면 결과</span></div>
           <div className="cs-upload-row">
-            <span className="badge ok">조회 완료</span>
+            <span className="badge info">결과 확인 필요</span>
             <button className="go" onClick={() => fetchSingleResult(runStatus.runId)}>화면 결과 다시 불러오기</button>
           </div>
         </section>
@@ -505,14 +578,29 @@ export default function CourtSearchTab() {
         .cs-label { font-weight:600; font-size:14px; }
         .cs-link { background:none; border:none; color:#2563eb; cursor:pointer; font-size:13px; text-decoration:underline; padding:0; }
         .cs-hint { font-size:12px; color:#666; margin:4px 0 0; }
-        .cs-single-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; }
+        .cs-single-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:10px; flex:1 1 100%; width:100%; }
         .cs-single-grid label { display:flex; flex-direction:column; gap:5px; font-size:12px; color:#475569; }
         .cs-single-grid input { min-height:36px; border:1px solid #cbd5e1; border-radius:6px; padding:0 10px; font:inherit; color:#111827; }
-        .cs-single-actions { margin-top:12px; }
+        .cs-single-actions { margin-top:14px; align-items:stretch; flex-direction:column; flex:1 1 100%; width:100%; }
+        .cs-diagnostic-start { width:100%; min-height:58px; display:flex; align-items:center; justify-content:center; gap:10px; font-size:16px; font-weight:700; border-radius:10px; box-shadow:0 5px 14px rgba(31,78,121,.18); }
+        .controls .cs-diagnostic-start span { color:#fff; font-size:inherit; font-weight:inherit; }
+        .cs-diagnostic-start:disabled { box-shadow:none; }
+        .cs-diagnostic-icon { display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; border-radius:50%; background:rgba(255,255,255,.18); font-size:20px; }
         .cs-upload-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
         .cs-upload-btn { padding:6px 14px; border:1.5px dashed #999; border-radius:6px; background:#f8f9fa; cursor:pointer; font-size:13px; max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
         .cs-upload-btn:hover { border-color:#1F4E79; }
         .cs-status-row { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+        .cs-diagnostic-flow { display:grid; grid-template-columns:minmax(0,1fr) 24px minmax(0,1fr) 24px minmax(0,1fr); align-items:center; margin:0 0 14px; }
+        .cs-flow-item { min-height:44px; display:flex; align-items:center; justify-content:center; gap:7px; padding:7px 9px; border:1px solid #d8dee8; border-radius:8px; background:#f8fafc; color:#64748b; font-size:12px; text-align:center; }
+        .cs-flow-item strong { display:inline-flex; align-items:center; justify-content:center; width:20px; height:20px; border-radius:50%; background:#e2e8f0; color:#475569; }
+        .cs-flow-item.in_progress { color:#1d4ed8; border-color:#93c5fd; background:#eff6ff; }
+        .cs-flow-item.in_progress strong { color:#fff; background:#2563eb; }
+        .cs-flow-item.success { color:#047857; border-color:#a7f3d0; background:#ecfdf5; }
+        .cs-flow-item.success strong { color:#fff; background:#059669; }
+        .cs-flow-item.failure { color:#b91c1c; border-color:#fecaca; background:#fef2f2; }
+        .cs-flow-item.failure strong { color:#fff; background:#dc2626; }
+        .cs-flow-line { height:2px; background:#e2e8f0; }
+        .cs-flow-line.done { background:#34d399; }
         .cs-time { font-size:12px; color:#666; }
         .cs-stage-message { margin-top:10px; color:#1e3a5f; font-size:13px; }
         .cs-progress { display:flex; align-items:center; gap:10px; margin-top:10px; font-size:13px; color:#444; }
@@ -522,8 +610,12 @@ export default function CourtSearchTab() {
         .cs-spinner { width:18px; height:18px; border:2px solid #ddd; border-top-color:#1F4E79; border-radius:50%; animation:spin .8s linear infinite; }
         @keyframes spin { to { transform:rotate(360deg); } }
         .badge.info { background:#e8f0fe; color:#1a56db; }
+        .badge.fail { background:#fef2f2; color:#b91c1c; border:1px solid #fecaca; }
         .cs-result-panel { border-top:3px solid #1F4E79; }
         .cs-result-heading { font-size:17px; font-weight:700; margin-bottom:14px; color:#1f2937; }
+        .cs-result-alert { margin:0 0 14px; padding:10px 12px; border-radius:6px; font-size:13px; font-weight:600; }
+        .cs-result-alert.fail { color:#991b1b; background:#fef2f2; border:1px solid #fecaca; }
+        .cs-result-alert.warn { color:#92400e; background:#fffbeb; border:1px solid #fde68a; }
         .cs-result-section { margin-top:16px; }
         .cs-result-title { border-bottom:2px solid #1f2937; padding:0 0 7px; font-size:14px; font-weight:700; color:#1f2937; }
         .cs-basic-grid { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); border-top:1px solid #d8dee8; }
@@ -536,7 +628,7 @@ export default function CourtSearchTab() {
         .cs-result-table th { background:#f3f4f6; font-weight:600; white-space:nowrap; }
         .cs-long-cell { min-width:260px; }
         .cs-empty-cell { text-align:center !important; color:#64748b; }
-        @media (max-width:700px) { .cs-single-grid, .cs-basic-grid { grid-template-columns:1fr; } .cs-basic-cell { grid-template-columns:100px minmax(0,1fr); } }
+        @media (max-width:700px) { .cs-single-grid, .cs-basic-grid { grid-template-columns:1fr; } .cs-basic-cell { grid-template-columns:100px minmax(0,1fr); } .cs-diagnostic-flow { grid-template-columns:1fr; gap:6px; } .cs-flow-line { width:2px; height:10px; justify-self:center; } }
       `}</style>
     </div>
   );

@@ -15,6 +15,9 @@ export default async function handler(req, res) {
     '고속 조회환경 확인': '브라우저와 캡차 인식기 준비 상태를 확인하고 있습니다.',
     '누적 캡차 모델 불러오기': '검증된 누적 캡차 모델을 불러오고 있습니다.',
     '단건 JSON 입력 준비': '입력한 사건정보를 JSON 조회 요청으로 준비하고 있습니다.',
+    '법원 사이트 연결 진단': '현재 실행환경의 공인 IP에서 법원 사이트까지 DNS → TCP → TLS → HTTP 연결을 확인하고 있습니다.',
+    '연결 진단 실패 결과 준비': '이 실행환경에서는 조회하지 않고 새 실행환경 재시도를 준비하고 있습니다.',
+    '법원 연결 진단 기록 보관': '실행환경과 연결 단계별 진단 결과를 기록하고 있습니다.',
     '단건 사건검색': '법원 접속 → 캡차 처리 → 사건 결과 확인을 진행하고 있습니다.',
     '단건 새 실행환경 재조회': '새 실행환경과 공인 IP에서 단건 조회를 다시 시도하고 있습니다.',
     '단건 최종 JSON 결과 확정': '조회 결과를 화면 표시용 JSON으로 확정하고 있습니다.',
@@ -42,6 +45,9 @@ export default async function handler(req, res) {
     let currentStep = '';
     let stageMessage = '';
     let activeJobs = [];
+    let diagnosticStatus = 'pending';
+    let diagnosticAttempts = [];
+    let lookupAttempts = [];
     const jobsRes = await fetch(
       `https://api.github.com/repos/${REPO}/actions/runs/${run.id}/jobs?per_page=30`,
       { headers: { Authorization: `token ${GITHUB_TOKEN}`, Accept: 'application/vnd.github.v3+json' } },
@@ -49,6 +55,36 @@ export default async function handler(req, res) {
     if (jobsRes.ok) {
       const jobs = (await jobsRes.json()).jobs || [];
       activeJobs = jobs.filter((job) => job.status === 'in_progress').map((job) => job.name);
+      diagnosticAttempts = jobs.flatMap((item) => (
+        (item.steps || [])
+          .filter((step) => step.name === '법원 사이트 연결 진단')
+          .map((step) => ({
+            job: item.name,
+            status: step.status,
+            conclusion: step.conclusion,
+          }))
+      ));
+      lookupAttempts = jobs.flatMap((item) => (
+        (item.steps || [])
+          .filter((step) => ['단건 사건검색', '단건 새 실행환경 재조회'].includes(step.name))
+          .map((step) => ({
+            job: item.name,
+            name: step.name,
+            status: step.status,
+            conclusion: step.conclusion,
+          }))
+      ));
+      for (let index = diagnosticAttempts.length - 1; index >= 0; index -= 1) {
+        const attempt = diagnosticAttempts[index];
+        if (attempt.status === 'in_progress') {
+          diagnosticStatus = 'in_progress';
+          break;
+        }
+        if (attempt.status === 'completed') {
+          diagnosticStatus = attempt.conclusion === 'success' ? 'success' : 'failure';
+          break;
+        }
+      }
       const job = jobs.find((item) => item.status === 'in_progress') || jobs.at(-1);
       currentStep = job?.steps?.find((step) => step.status === 'in_progress')?.name
         || (run.status === 'completed' ? '완료' : '실행 준비');
@@ -83,6 +119,9 @@ export default async function handler(req, res) {
       currentStep,
       stageMessage,
       activeJobs,
+      diagnosticStatus,
+      diagnosticAttempts,
+      lookupAttempts,
       resultReady,
     });
   } catch (error) {
