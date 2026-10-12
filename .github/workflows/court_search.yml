@@ -130,7 +130,7 @@ jobs:
           DEBUG_TABLES: '1'
           COURT_PARTIAL_SIZE: '20'
           COURT_PARTIAL_DIR: court-search/partial-results
-          COURT_ARTIFACT_UPLOADER: court-search/artifact-uploader/upload.cjs
+          COURT_ARTIFACT_UPLOADER: court-search/artifact-uploader/upload.mjs
         run: |
           args=("court-search/$INPUT_FILE" court-search/output.xlsx)
           if [ "$PREPARE_ONLY" = "true" ]; then args+=(--prepare-only); fi

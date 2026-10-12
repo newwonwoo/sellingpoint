@@ -1,10 +1,10 @@
-const path = require('node:path');
-const { DefaultArtifactClient } = require('@actions/artifact');
+import path from 'node:path';
+import { DefaultArtifactClient } from '@actions/artifact';
 
 async function main() {
   const [artifactName, sourcePath] = process.argv.slice(2);
   if (!artifactName || !sourcePath) {
-    throw new Error('사용법: node upload.cjs <artifact-name> <xlsx-path>');
+    throw new Error('사용법: node upload.mjs <artifact-name> <xlsx-path>');
   }
   if (!/^court-search-partial-(?:r\d+-)?\d+-\d+$/.test(artifactName)) {
     throw new Error(`허용되지 않은 중간 결과 이름: ${artifactName}`);
