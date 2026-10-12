@@ -49,13 +49,14 @@ jobs:
           path: |
             court-search/.runtime-venv
             court-search/.easyocr-model
-          key: court-search-runtime-v2-ubuntu-24.04-${{ hashFiles('court-search/requirements.txt') }}
+          key: court-search-runtime-v3-cpu-ubuntu-24.04-${{ hashFiles('court-search/requirements.txt') }}
 
       - name: 캐시 없을 때 조회환경 준비
         if: ${{ steps.runtime-cache.outputs.cache-hit != 'true' }}
         run: |
           python3 -m venv court-search/.runtime-venv
           "$COURT_PYTHON" -m pip install --upgrade pip
+          "$COURT_PYTHON" -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           "$COURT_PYTHON" -m pip install -r court-search/requirements.txt
           "$COURT_PYTHON" - <<'PY'
           import easyocr
@@ -177,13 +178,14 @@ jobs:
           path: |
             court-search/.runtime-venv
             court-search/.easyocr-model
-          key: court-search-runtime-v2-ubuntu-24.04-${{ hashFiles('court-search/requirements.txt') }}
+          key: court-search-runtime-v3-cpu-ubuntu-24.04-${{ hashFiles('court-search/requirements.txt') }}
 
       - name: 캐시 없을 때 조회환경 준비
         if: ${{ steps.runtime-cache.outputs.cache-hit != 'true' }}
         run: |
           python3 -m venv court-search/.runtime-venv
           "$COURT_PYTHON" -m pip install --upgrade pip
+          "$COURT_PYTHON" -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
           "$COURT_PYTHON" -m pip install -r court-search/requirements.txt
           "$COURT_PYTHON" - <<'PY'
           import easyocr
