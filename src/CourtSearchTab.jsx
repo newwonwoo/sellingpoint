@@ -501,7 +501,7 @@ export default function CourtSearchTab() {
               <button className="cs-upload-btn" onClick={() => fileRef.current?.click()} disabled={uploading || isRunning}>{file ? `📄 ${file.name}` : "파일 선택"}</button>
               <button className="go cs-batch-diagnostic-start" onClick={() => startWithFile(file)} disabled={!file || uploading || isRunning}>{uploading ? "진단 실행 등록 중…" : isRunning ? "연결 진단·조회 진행 중…" : "연결 진단 후 조회 시작"}</button>
             </div>
-            <p className="cs-hint">조회 러너마다 법원 사이트 연결을 한 번 먼저 확인하고, 통과한 경우에만 최대 4개 워커를 실행합니다.</p>
+            <p className="cs-hint">조회 러너마다 법원 사이트 연결을 1회 먼저 확인하고, 통과한 경우에만 최대 4개 워커를 실행합니다.</p>
           </section>
         </>
       )}
