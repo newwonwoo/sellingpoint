@@ -5,9 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 from copy import copy
+from datetime import datetime
 from pathlib import Path
 
 import openpyxl
+from output_schema import OUTPUT_HEADERS, write_output
 
 
 CHUNK_SIZE = 20
@@ -53,6 +55,24 @@ def print_count(path: Path):
     if not rows:
         raise ValueError("조회할 사건이 없습니다.")
     print(f"total={len(rows)}")
+
+
+def write_blocked_output(source: Path, target: Path, reason: str):
+    """연결 진단 실패 시 실제 조회 없이 모든 입력을 보류 결과로 남긴다."""
+    _, rows = input_rows(source)
+    checked_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    results = [
+        {header: '' for header in OUTPUT_HEADERS} | {
+            '법원': str(row[0]).strip(),
+            '사건번호': str(row[1]).strip(),
+            '사건명': f'조회보류: {reason}',
+            '조회일시': checked_at,
+        }
+        for row in rows
+    ]
+    target.parent.mkdir(parents=True, exist_ok=True)
+    write_output(results, str(target))
+    print(f'⏹ 연결 진단 실패 결과 생성: {len(results)}건')
 
 
 def write_slice(source: Path, target: Path, start: int, end: int):
@@ -178,6 +198,11 @@ def main():
     count_parser = subparsers.add_parser("count")
     count_parser.add_argument("input", type=Path)
 
+    blocked_parser = subparsers.add_parser("blocked-output")
+    blocked_parser.add_argument("input", type=Path)
+    blocked_parser.add_argument("output", type=Path)
+    blocked_parser.add_argument("reason")
+
     slice_parser = subparsers.add_parser("slice")
     slice_parser.add_argument("input", type=Path)
     slice_parser.add_argument("output", type=Path)
@@ -204,6 +229,8 @@ def main():
         print_matrix(args.input)
     elif args.command == "count":
         print_count(args.input)
+    elif args.command == "blocked-output":
+        write_blocked_output(args.input, args.output, args.reason)
     elif args.command == "slice":
         write_slice(args.input, args.output, args.start, args.end)
     elif args.command == "combine":

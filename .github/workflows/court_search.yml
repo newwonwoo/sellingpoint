@@ -110,13 +110,43 @@ jobs:
           test -x "$PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
           "$COURT_PYTHON" -c "import easyocr, openpyxl, playwright; print('고속 일괄 조회환경 준비 완료')"
 
+      - name: 법원 사이트 연결 진단
+        id: court_connection
+        if: ${{ inputs.prepare_only == false }}
+        continue-on-error: true
+        run: >-
+          "$COURT_PYTHON" -u court-search/connection_probe.py
+          --timeout 8
+          --output court-search/connection-diagnostic-batch-primary.json
+
+      - name: 연결 진단 실패 결과 준비
+        if: ${{ inputs.prepare_only == false && steps.court_connection.outcome != 'success' }}
+        env:
+          INPUT_FILE: ${{ inputs.input_file }}
+        run: >-
+          "$COURT_PYTHON" court-search/chunk_workbook.py blocked-output
+          "court-search/$INPUT_FILE" court-search/output.xlsx
+          "법원 사이트 연결 진단 실패"
+
+      - name: 법원 연결 진단 기록 보관
+        if: ${{ always() && inputs.prepare_only == false }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: court-connection-batch-primary
+          path: court-search/connection-diagnostic-batch-primary.json
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: 중간 다운로드 도구 준비
+        if: ${{ inputs.prepare_only == true || steps.court_connection.outcome == 'success' }}
         run: npm ci --prefix court-search/artifact-uploader --omit=dev --no-audit --no-fund
 
       - name: 중간 업로드 큐 시작
+        if: ${{ inputs.prepare_only == true || steps.court_connection.outcome == 'success' }}
         uses: ./court-search/artifact-uploader
 
       - name: 누적 캡차 모델 불러오기
+        if: ${{ inputs.prepare_only == true || steps.court_connection.outcome == 'success' }}
         uses: actions/cache/restore@v4
         with:
           path: court-search/captcha-model
@@ -125,6 +155,7 @@ jobs:
             court-captcha-v2-
 
       - name: 사건검색 실행
+        if: ${{ inputs.prepare_only == true || steps.court_connection.outcome == 'success' }}
         env:
           INPUT_FILE: ${{ inputs.input_file }}
           PREPARE_ONLY: ${{ inputs.prepare_only }}
@@ -296,13 +327,42 @@ jobs:
           test -x "$PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
           "$COURT_PYTHON" -c "import easyocr, openpyxl, playwright; print('고속 일괄 재조회환경 준비 완료')"
 
+      - name: 법원 사이트 연결 진단
+        id: court_connection
+        continue-on-error: true
+        run: >-
+          "$COURT_PYTHON" -u court-search/connection_probe.py
+          --timeout 8
+          --output court-search/connection-diagnostic-batch-retry.json
+
+      - name: 연결 진단 실패 결과 준비
+        if: ${{ steps.court_connection.outcome != 'success' }}
+        env:
+          INPUT_FILE: ${{ inputs.input_file }}
+        run: >-
+          "$COURT_PYTHON" court-search/chunk_workbook.py blocked-output
+          "court-search/$INPUT_FILE" court-search/output.xlsx
+          "새 실행환경 법원 사이트 연결 진단 실패"
+
+      - name: 법원 연결 진단 기록 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: court-connection-batch-retry
+          path: court-search/connection-diagnostic-batch-retry.json
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: 중간 다운로드 도구 준비
+        if: ${{ steps.court_connection.outcome == 'success' }}
         run: npm ci --prefix court-search/artifact-uploader --omit=dev --no-audit --no-fund
 
       - name: 중간 업로드 큐 시작
+        if: ${{ steps.court_connection.outcome == 'success' }}
         uses: ./court-search/artifact-uploader
 
       - name: 누적 캡차 모델 불러오기
+        if: ${{ steps.court_connection.outcome == 'success' }}
         uses: actions/cache/restore@v4
         with:
           path: court-search/captcha-model
@@ -311,6 +371,7 @@ jobs:
             court-captcha-v2-
 
       - name: 새 실행기 전체 사건 재조회
+        if: ${{ steps.court_connection.outcome == 'success' }}
         env:
           INPUT_FILE: ${{ inputs.input_file }}
           COURT_WORKERS: '3'
@@ -363,13 +424,14 @@ jobs:
           retention-days: 7
 
       - name: 재조회 통과 캡차 학습 후보 확정
+        if: ${{ steps.court_connection.outcome == 'success' }}
         run: |
           mkdir -p court-search/captcha-success/images
           touch court-search/captcha-success/labels.jsonl
           echo "새 실행기 통과 확인 샘플: $(wc -l < court-search/captcha-success/labels.jsonl)건"
 
       - name: 기존 실행 학습자료 최초 이관
-        if: ${{ inputs.captcha_seed_run_id != '' }}
+        if: ${{ steps.court_connection.outcome == 'success' && inputs.captcha_seed_run_id != '' }}
         env:
           GH_TOKEN: ${{ github.token }}
           SEED_RUN_ID: ${{ inputs.captcha_seed_run_id }}
@@ -383,6 +445,7 @@ jobs:
             --dir court-search/legacy-captcha
 
       - name: 공식 캡차 학습
+        if: ${{ steps.court_connection.outcome == 'success' }}
         env:
           SEED_RUN_ID: ${{ inputs.captcha_seed_run_id }}
         run: |
@@ -398,6 +461,7 @@ jobs:
           cat court-search/captcha-model/training-report.json
 
       - name: 누적 캡차 모델 감사자료 보관
+        if: ${{ steps.court_connection.outcome == 'success' }}
         uses: actions/upload-artifact@v4
         with:
           name: captcha-learning-model
@@ -406,6 +470,7 @@ jobs:
           retention-days: 30
 
       - name: 다음 실행용 누적 캡차 모델 저장
+        if: ${{ steps.court_connection.outcome == 'success' }}
         uses: actions/cache/save@v4
         with:
           path: court-search/captcha-model
@@ -423,3 +488,9 @@ jobs:
             echo "캡차 학습 결과:"
             cat court-search/captcha-model/training-report.json
           fi
+
+      - name: 재조회 연결 진단 실패 상태 반영
+        if: ${{ steps.court_connection.outcome != 'success' }}
+        run: |
+          echo "❌ 새 실행환경도 법원 사이트 연결 진단에 실패했습니다."
+          exit 1

@@ -35,14 +35,17 @@ export default async function handler(req, res) {
     '고속 재조회환경 불러오기': '실패 사건 재조회용 Python·OCR 환경을 빠르게 불러오고 있습니다.',
     '캐시 없을 때 재조회환경 준비': '재조회 환경 캐시가 없어 이번 한 번만 조회 도구를 설치하고 있습니다.',
     '고속 재조회환경 확인': '재조회용 브라우저와 캡차 인식 도구가 정상인지 확인하고 있습니다.',
-    '새 실행기 전체 사건 재조회': '첫 실행기의 접속 경로가 막혀 새 실행기에서 워커 3개로 다시 조회하고 있습니다.',
+    '법원 사이트 연결 진단': '현재 실행환경에서 DNS → TCP → TLS → HTTP → 실제 Chromium 첫 화면 연결을 확인하고 있습니다.',
+    '연결 진단 실패 결과 준비': '이 실행환경에서는 사건을 조회하지 않고 새 실행환경 재시도를 준비하고 있습니다.',
+    '법원 연결 진단 기록 보관': '실행환경과 연결 단계별 진단 결과를 기록하고 있습니다.',
+    '새 실행기 전체 사건 재조회': '새 실행환경에서 3개 워커로 시작해 연결이 안정적이면 최대 4개로 조회하고 있습니다.',
     '재조회 결과 파일 생성 확인': '새 실행기의 전체 결과 건수와 파일 상태를 확인하고 있습니다.',
     '재조회 전체 결과 엑셀 보관': '새 실행기의 최종 결과를 웹앱에서 받을 수 있도록 보관하고 있습니다.',
     '입력 파일 확인': '업로드한 사건번호 파일의 형식을 확인하고 있습니다.',
     '조회 건수 확인': '전체 사건 수를 확인하고 한 실행환경에 작업을 준비하고 있습니다.',
     '중간 다운로드 도구 준비': '20건씩 완료 결과를 공개할 도구를 준비하고 있습니다.',
     '중간 업로드 큐 시작': '검색과 동시에 실행할 중간 결과 업로드 큐를 시작하고 있습니다.',
-    '사건검색 실행': '3개 브라우저 워커가 완료되는 순서대로 다음 사건을 조회하고 있습니다.',
+    '사건검색 실행': '3개 브라우저 워커로 시작해 연결이 안정적이면 최대 4개가 다음 사건을 이어서 조회합니다.',
     '결과 파일 생성 확인': '전체 결과의 건수와 파일 상태를 확인하고 있습니다.',
     '전체 결과 엑셀 보관': '전체 결과를 웹앱에서 받을 수 있도록 보관하고 있습니다.',
     '기존 누적 캡차 모델 복원': '이전 실행에서 검증된 캡차 학습 모델을 불러오고 있습니다.',
@@ -94,6 +97,9 @@ export default async function handler(req, res) {
     let steps = [];
     let activeJobs = [];
     let expectedCases = 0;
+    let diagnosticStatus = 'pending';
+    let diagnosticAttempts = [];
+    let lookupAttempts = [];
     try {
       const jobs = await fetchAllPages(
         `https://api.github.com/repos/${REPO}/actions/runs/${run.id}/jobs`,
@@ -110,6 +116,36 @@ export default async function handler(req, res) {
           if (match) return Math.max(maximum, Number(match[2]));
           return fullMatch ? Math.max(maximum, Number(fullMatch[1])) : maximum;
         }, 0);
+        diagnosticAttempts = jobs.flatMap((item) => (
+          (item.steps || [])
+            .filter((step) => step.name === '법원 사이트 연결 진단')
+            .map((step) => ({
+              job: item.name,
+              status: step.status,
+              conclusion: step.conclusion,
+            }))
+        ));
+        lookupAttempts = jobs.flatMap((item) => (
+          (item.steps || [])
+            .filter((step) => ['사건검색 실행', '새 실행기 전체 사건 재조회'].includes(step.name))
+            .map((step) => ({
+              job: item.name,
+              name: step.name,
+              status: step.status,
+              conclusion: step.conclusion,
+            }))
+        ));
+        for (let index = diagnosticAttempts.length - 1; index >= 0; index -= 1) {
+          const attempt = diagnosticAttempts[index];
+          if (attempt.status === 'in_progress') {
+            diagnosticStatus = 'in_progress';
+            break;
+          }
+          if (attempt.status === 'completed') {
+            diagnosticStatus = attempt.conclusion === 'success' ? 'success' : 'failure';
+            break;
+          }
+        }
         const job = jobs.find((candidate) => candidate.status === 'in_progress') || jobs.at(-1);
         steps = (job?.steps || []).map((step) => ({ name: step.name, status: step.status, conclusion: step.conclusion }));
         const active = job?.steps?.find((step) => step.status === 'in_progress');
@@ -179,6 +215,9 @@ export default async function handler(req, res) {
       partialResults,
       expectedCases,
       completedCases: partialResults.reduce((sum, item) => sum + item.count, 0),
+      diagnosticStatus,
+      diagnosticAttempts,
+      lookupAttempts,
     });
 
   } catch (e) {

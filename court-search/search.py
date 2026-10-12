@@ -21,11 +21,11 @@ from pathlib import Path
 from datetime import datetime
 
 import openpyxl
-from openpyxl.styles import Font, PatternFill, Alignment
 from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeout
 
 sys.path.insert(0, os.path.dirname(__file__))
 from captcha_solver import learn_success, load_success_dataset, predict_captcha
+from output_schema import OUTPUT_HEADERS, write_output
 
 # ──────────────────────────────────────────────
 # 설정
@@ -53,16 +53,6 @@ CAPTCHA_SEED_DIR = os.environ.get(
     'CAPTCHA_SEED_DIR', os.path.join(BASE_DIR, 'captcha-model')
 )
 CAPTCHA_SAMPLE_LOCK = threading.Lock()
-
-OUTPUT_HEADERS = [
-    '법원', '사건번호', '사건명', '재판부',
-    '접수일', '종국결과', '결정문송달일', '확정일',
-    '진행_1일자', '진행_1내용', '진행_1결과', '진행_1공시문',
-    '진행_2일자', '진행_2내용', '진행_2결과', '진행_2공시문',
-    '진행_3일자', '진행_3내용', '진행_3결과', '진행_3공시문',
-    '관련사건_법원', '관련사건_번호',
-    '신청인', '피신청인', '조회일시',
-]
 
 # ── 신규 사이트 법원코드 매핑 ──────────────────
 # select#mf_ssgoTopMainTab_contents_content1_body_sbx_cortCd 의 option value
@@ -769,56 +759,6 @@ async def search_one(
         '사건명': f'조회실패: {failure_reason}',
         '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     }
-
-
-# ──────────────────────────────────────────────
-# 출력 (일괄=xlsx, 단건=json)
-# ──────────────────────────────────────────────
-def write_output(results: list[dict], path: str):
-    if Path(path).suffix.lower() == '.json':
-        normalized = [
-            {header: data.get(header, '') for header in OUTPUT_HEADERS}
-            for data in results
-        ]
-        Path(path).write_text(
-            json.dumps({'results': normalized}, ensure_ascii=False, indent=2),
-            encoding='utf-8',
-        )
-        print(f"\n✅ JSON 결과 저장: {path} ({len(results)}건)")
-        return
-
-    wb = openpyxl.Workbook()
-    ws = wb.active
-    ws.title = '조회결과'
-
-    header_fill = PatternFill(start_color='1F4E79', end_color='1F4E79', fill_type='solid')
-    header_font = Font(bold=True, color='FFFFFF', size=10)
-
-    for col, header in enumerate(OUTPUT_HEADERS, 1):
-        cell = ws.cell(row=1, column=col, value=header)
-        cell.fill = header_fill
-        cell.font = header_font
-        cell.alignment = Alignment(horizontal='center', vertical='center')
-
-    for row_idx, data in enumerate(results, 2):
-        for col, header in enumerate(OUTPUT_HEADERS, 1):
-            ws.cell(row=row_idx, column=col, value=data.get(header, ''))
-
-    col_widths = {
-        1: 20, 2: 16, 3: 24, 4: 20,
-        5: 12, 6: 20, 7: 14, 8: 12,
-        9: 12, 10: 30, 11: 20, 12: 16,
-        13: 12, 14: 30, 15: 20, 16: 16,
-        17: 12, 18: 30, 19: 20, 20: 16,
-        21: 18, 22: 16,
-        23: 24, 24: 24, 25: 18,
-    }
-    for col, width in col_widths.items():
-        ws.column_dimensions[openpyxl.utils.get_column_letter(col)].width = width
-
-    ws.freeze_panes = 'A2'
-    wb.save(path)
-    print(f"\n✅ 결과 저장: {path} ({len(results)}건)")
 
 
 class PartialResultPublisher:

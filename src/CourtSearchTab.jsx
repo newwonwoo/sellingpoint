@@ -123,17 +123,18 @@ function ProgressTable({ row }) {
   );
 }
 
-function DiagnosticFlow({ runStatus, singleOutcome }) {
+function DiagnosticFlow({ runStatus, mode, singleOutcome }) {
   const diagnostic = runStatus?.diagnosticStatus || "pending";
+  const hasDiagnostic = Boolean(runStatus?.diagnosticAttempts?.length);
   const currentStep = runStatus?.currentStep || "";
-  const lookupActive = /단건 사건검색|단건 새 실행환경 재조회/.test(currentStep);
+  const lookupActive = /단건 사건검색|단건 새 실행환경 재조회|사건검색 실행|새 실행기 전체 사건 재조회/.test(currentStep);
   const lookupAttempted = (runStatus?.lookupAttempts || []).some((attempt) => (
     attempt.conclusion !== "skipped"
     && (attempt.status === "in_progress" || attempt.status === "completed")
   ));
   const lookupDone = lookupAttempted && !lookupActive;
-  const lookupBlocked = runStatus?.status === "completed" && !lookupAttempted;
-  const resultDone = runStatus?.status === "completed" && Boolean(singleOutcome);
+  const lookupBlocked = runStatus?.status === "completed" && hasDiagnostic && !lookupAttempted;
+  const resultDone = runStatus?.status === "completed" && (mode === "batch" || Boolean(singleOutcome));
   const diagnosticText = diagnostic === "success"
     ? "연결 진단 통과"
     : diagnostic === "failure"
@@ -142,12 +143,12 @@ function DiagnosticFlow({ runStatus, singleOutcome }) {
         ? "연결 진단 중"
         : "연결 진단 대기";
   return (
-    <div className="cs-diagnostic-flow" aria-label="단건 조회 진행 단계">
+    <div className="cs-diagnostic-flow" aria-label={mode === "batch" ? "일괄조회 진행 단계" : "단건 조회 진행 단계"}>
       <div className={`cs-flow-item ${diagnostic}`}><strong>1</strong><span>{diagnosticText}</span></div>
       <div className={`cs-flow-line ${diagnostic === "success" ? "done" : ""}`} />
       <div className={`cs-flow-item ${lookupDone ? "success" : lookupActive ? "in_progress" : lookupBlocked ? "failure" : "pending"}`}><strong>2</strong><span>{lookupDone ? "사건조회 완료" : lookupActive ? "사건조회 중" : lookupBlocked ? "진단 실패로 미실행" : "사건조회 대기"}</span></div>
       <div className={`cs-flow-line ${lookupDone ? "done" : ""}`} />
-      <div className={`cs-flow-item ${resultDone ? (singleOutcome === "failure" ? "failure" : "success") : "pending"}`}><strong>3</strong><span>{resultDone ? "결과 확인" : "결과 대기"}</span></div>
+      <div className={`cs-flow-item ${resultDone ? (singleOutcome === "failure" || lookupBlocked ? "failure" : "success") : "pending"}`}><strong>3</strong><span>{resultDone ? (mode === "batch" ? "결과 파일 준비" : "결과 확인") : "결과 대기"}</span></div>
     </div>
   );
 }
@@ -498,8 +499,9 @@ export default function CourtSearchTab() {
             <div className="cs-upload-row">
               <input ref={fileRef} type="file" accept=".xlsx" style={{ display: "none" }} onChange={handleFileChange} />
               <button className="cs-upload-btn" onClick={() => fileRef.current?.click()} disabled={uploading || isRunning}>{file ? `📄 ${file.name}` : "파일 선택"}</button>
-              <button className="go" onClick={() => startWithFile(file)} disabled={!file || uploading || isRunning}>{uploading ? "업로드 중…" : isRunning ? "조회 중…" : "조회 시작"}</button>
+              <button className="go cs-batch-diagnostic-start" onClick={() => startWithFile(file)} disabled={!file || uploading || isRunning}>{uploading ? "진단 실행 등록 중…" : isRunning ? "연결 진단·조회 진행 중…" : "연결 진단 후 조회 시작"}</button>
             </div>
+            <p className="cs-hint">조회 러너마다 법원 사이트 연결을 한 번 먼저 확인하고, 통과한 경우에만 최대 4개 워커를 실행합니다.</p>
           </section>
         </>
       )}
@@ -509,7 +511,7 @@ export default function CourtSearchTab() {
       {runStatus && runStatus.status !== "none" && (
         <section className="panel">
           <div className="cs-step"><span className="cs-badge">2</span><span className="cs-label">진행 상태</span></div>
-          {mode === "single" && <DiagnosticFlow runStatus={runStatus} singleOutcome={singleOutcome} />}
+          <DiagnosticFlow runStatus={runStatus} mode={mode} singleOutcome={singleOutcome} />
           <div className="cs-status-row">
             <span className={`badge ${runStatus.status === "completed" ? (completedSingleStatus?.badgeClass || (runStatus.conclusion === "success" ? "ok" : runStatus.conclusion === "failure" ? "fail" : "warn")) : "info"}`}>
               {runStatus.status === "completed" ? completedSingleStatus?.label || CONCLUSION_LABEL[runStatus.conclusion] || runStatus.conclusion : STATUS_LABEL[runStatus.status] || runStatus.status}
@@ -585,6 +587,7 @@ export default function CourtSearchTab() {
         .cs-diagnostic-start { width:100%; min-height:58px; display:flex; align-items:center; justify-content:center; gap:10px; font-size:16px; font-weight:700; border-radius:10px; box-shadow:0 5px 14px rgba(31,78,121,.18); }
         .controls .cs-diagnostic-start span { color:#fff; font-size:inherit; font-weight:inherit; }
         .cs-diagnostic-start:disabled { box-shadow:none; }
+        .cs-batch-diagnostic-start { min-width:230px; min-height:44px; }
         .cs-diagnostic-icon { display:inline-flex; align-items:center; justify-content:center; width:28px; height:28px; border-radius:50%; background:rgba(255,255,255,.18); font-size:20px; }
         .cs-upload-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
         .cs-upload-btn { padding:6px 14px; border:1.5px dashed #999; border-radius:6px; background:#f8f9fa; cursor:pointer; font-size:13px; max-width:260px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
