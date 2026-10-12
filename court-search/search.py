@@ -754,7 +754,8 @@ class PartialResultPublisher:
         self.total = len(results)
         output_dir = os.environ.get('COURT_PARTIAL_DIR', '').strip()
         self.output_dir = Path(output_dir) if output_dir else None
-        self.uploader = os.environ.get('COURT_ARTIFACT_UPLOADER', '').strip()
+        queue_dir = os.environ.get('COURT_ARTIFACT_QUEUE_DIR', '').strip()
+        self.artifact_queue_dir = Path(queue_dir) if queue_dir else None
         try:
             self.chunk_size = max(1, int(os.environ.get('COURT_PARTIAL_SIZE', '20')))
         except ValueError:
@@ -763,7 +764,7 @@ class PartialResultPublisher:
             self.revision_base = max(0, int(os.environ.get('COURT_PARTIAL_REVISION', '0')))
         except ValueError:
             self.revision_base = 0
-        self.enabled = bool(self.output_dir and self.uploader)
+        self.enabled = bool(self.output_dir and self.artifact_queue_dir)
         self.next_start = 0
         self.queue = asyncio.Queue()
         self.lock = asyncio.Lock()
@@ -774,6 +775,7 @@ class PartialResultPublisher:
         if not self.enabled:
             return
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.artifact_queue_dir.mkdir(parents=True, exist_ok=True)
         self.worker_task = asyncio.create_task(self._upload_worker())
         print(f"중간 결과: {self.chunk_size}건 단위로 다운로드 파일을 공개합니다.")
 
@@ -823,16 +825,32 @@ class PartialResultPublisher:
                     return
                 artifact_name, path = item
                 try:
-                    process = await asyncio.create_subprocess_exec(
-                        'node', self.uploader, artifact_name, str(path),
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.STDOUT,
-                    )
-                    output, _ = await process.communicate()
-                    message = output.decode('utf-8', errors='replace').strip()
-                    if message:
-                        print(message)
-                    if process.returncode:
+                    request = self.artifact_queue_dir / f'{artifact_name}.request.json'
+                    done = self.artifact_queue_dir / f'{artifact_name}.done.json'
+                    failed = self.artifact_queue_dir / f'{artifact_name}.error.json'
+                    temporary = request.with_suffix('.tmp')
+                    temporary.write_text(json.dumps({
+                        'artifact_name': artifact_name,
+                        'path': str(path.resolve()),
+                    }, ensure_ascii=False), encoding='utf-8')
+                    temporary.replace(request)
+
+                    for _ in range(240):
+                        if done.exists():
+                            payload = json.loads(done.read_text(encoding='utf-8'))
+                            print(
+                                f"✅ 중간 결과 공개: {artifact_name} "
+                                f"(artifact {payload.get('id')}, {payload.get('size')} bytes)"
+                            )
+                            break
+                        if failed.exists():
+                            payload = json.loads(failed.read_text(encoding='utf-8'))
+                            print(f"❌ 중간 결과 업로드 실패: {payload.get('error', '알 수 없는 오류')}")
+                            self.failures.append(artifact_name)
+                            break
+                        await asyncio.sleep(0.5)
+                    else:
+                        print(f"❌ 중간 결과 업로드 시간 초과: {artifact_name}")
                         self.failures.append(artifact_name)
                 except Exception as error:
                     print(f"❌ 중간 결과 업로드 실행 실패: {artifact_name}: {error}")
@@ -847,6 +865,7 @@ class PartialResultPublisher:
         await self.queue.join()
         self.queue.put_nowait(None)
         await self.worker_task
+        (self.artifact_queue_dir / 'STOP').touch()
         if self.failures:
             print(
                 "⚠ 중간 다운로드 공개 실패: " + ', '.join(self.failures)

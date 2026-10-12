@@ -112,6 +112,9 @@ jobs:
       - name: 중간 다운로드 도구 준비
         run: npm ci --prefix court-search/artifact-uploader --omit=dev --no-audit --no-fund
 
+      - name: 중간 업로드 큐 시작
+        uses: ./court-search/artifact-uploader
+
       - name: 누적 캡차 모델 불러오기
         uses: actions/cache/restore@v4
         with:
@@ -132,7 +135,7 @@ jobs:
           DEBUG_TABLES: '1'
           COURT_PARTIAL_SIZE: '20'
           COURT_PARTIAL_DIR: court-search/partial-results
-          COURT_ARTIFACT_UPLOADER: court-search/artifact-uploader/upload.mjs
+          COURT_ARTIFACT_QUEUE_DIR: court-search/artifact-queue
         run: |
           args=("court-search/$INPUT_FILE" court-search/output.xlsx)
           if [ "$PREPARE_ONLY" = "true" ]; then args+=(--prepare-only); fi
@@ -294,6 +297,9 @@ jobs:
       - name: 중간 다운로드 도구 준비
         run: npm ci --prefix court-search/artifact-uploader --omit=dev --no-audit --no-fund
 
+      - name: 중간 업로드 큐 시작
+        uses: ./court-search/artifact-uploader
+
       - name: 누적 캡차 모델 불러오기
         uses: actions/cache/restore@v4
         with:
@@ -314,7 +320,7 @@ jobs:
           COURT_PARTIAL_SIZE: '20'
           COURT_PARTIAL_REVISION: '2'
           COURT_PARTIAL_DIR: court-search/partial-results
-          COURT_ARTIFACT_UPLOADER: court-search/artifact-uploader/upload.mjs
+          COURT_ARTIFACT_QUEUE_DIR: court-search/artifact-queue
         run: >-
           "$COURT_PYTHON" -u court-search/search.py
           "court-search/$INPUT_FILE" court-search/output.xlsx

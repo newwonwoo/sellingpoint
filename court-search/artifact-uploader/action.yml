@@ -1,0 +1,5 @@
+name: Court search artifact queue
+description: Start a background uploader with the GitHub Actions artifact credentials.
+runs:
+  using: node24
+  main: start.cjs
