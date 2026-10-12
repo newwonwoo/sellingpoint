@@ -27,7 +27,7 @@ on:
 
 permissions:
   contents: read
-  actions: read
+  actions: write
 
 env:
   COURT_PYTHON: court-search/.runtime-venv/bin/python
@@ -36,12 +36,10 @@ env:
 
 jobs:
   prepare:
-    name: 조회 묶음 준비
+    name: 조회 건수 확인
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.plan.outputs.matrix }}
-      total: ${{ steps.plan.outputs.total }}
-      chunk_count: ${{ steps.plan.outputs.chunk_count }}
+      total: ${{ steps.count.outputs.total }}
     steps:
       - name: 체크아웃
         uses: actions/checkout@v4
@@ -62,22 +60,17 @@ jobs:
           test -f "court-search/$INPUT_FILE"
           pip install openpyxl==3.1.5
 
-      - name: 20건 단위 작업 계획
-        id: plan
+      - name: 조회 건수 확인
+        id: count
         env:
           INPUT_FILE: ${{ inputs.input_file }}
-        run: python court-search/chunk_workbook.py matrix "court-search/$INPUT_FILE" >> "$GITHUB_OUTPUT"
+        run: python court-search/chunk_workbook.py count "court-search/$INPUT_FILE" >> "$GITHUB_OUTPUT"
 
   search:
-    name: 사건 ${{ matrix.start }}-${{ matrix.end }} 조회
+    name: 전체 ${{ needs.prepare.outputs.total }}건 조회
     needs: prepare
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      max-parallel: 3
-      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
-
+    timeout-minutes: 180
     steps:
       - name: 체크아웃
         uses: actions/checkout@v4
@@ -114,6 +107,9 @@ jobs:
           test -x "$PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
           "$COURT_PYTHON" -c "import easyocr, openpyxl, playwright; print('고속 일괄 조회환경 준비 완료')"
 
+      - name: 중간 다운로드 도구 준비
+        run: npm ci --prefix court-search/artifact-uploader --omit=dev --no-audit --no-fund
+
       - name: 누적 캡차 모델 불러오기
         uses: actions/cache/restore@v4
         with:
@@ -122,34 +118,28 @@ jobs:
           restore-keys: |
             court-captcha-v2-
 
-      - name: ${{ matrix.start }}-${{ matrix.end }}번 입력 준비
+      - name: 사건검색 실행
         env:
           INPUT_FILE: ${{ inputs.input_file }}
-          RANGE_START: ${{ matrix.start }}
-          RANGE_END: ${{ matrix.end }}
-        run: >-
-          "$COURT_PYTHON" court-search/chunk_workbook.py slice
-          "court-search/$INPUT_FILE" court-search/chunk-input.xlsx
-          "$RANGE_START" "$RANGE_END"
-
-      - name: ${{ matrix.start }}-${{ matrix.end }}번 사건검색
-        env:
           PREPARE_ONLY: ${{ inputs.prepare_only }}
-          COURT_WORKERS: ${{ matrix.workers }}
+          COURT_WORKERS: '3'
           OCR_TORCH_THREADS: '2'
           CAPTCHA_DATA_DIR: court-search/captcha-success
           CAPTCHA_SEED_DIR: court-search/captcha-model
           DEBUG_DIR: court-search/debug
           DEBUG_TABLES: '1'
+          COURT_PARTIAL_SIZE: '20'
+          COURT_PARTIAL_DIR: court-search/partial-results
+          COURT_ARTIFACT_UPLOADER: court-search/artifact-uploader/upload.cjs
         run: |
-          args=(court-search/chunk-input.xlsx court-search/output.xlsx)
+          args=("court-search/$INPUT_FILE" court-search/output.xlsx)
           if [ "$PREPARE_ONLY" = "true" ]; then args+=(--prepare-only); fi
           "$COURT_PYTHON" -u court-search/search.py "${args[@]}"
 
-      - name: 중간 결과 파일 확정
+      - name: 결과 파일 생성 확인
         env:
-          CHUNK_TAG: ${{ matrix.tag }}
-          EXPECTED_COUNT: ${{ matrix.count }}
+          EXPECTED_TOTAL: ${{ needs.prepare.outputs.total }}
+          PREPARE_ONLY: ${{ inputs.prepare_only }}
         run: |
           "$COURT_PYTHON" - <<'PY'
           import os
@@ -158,236 +148,22 @@ jobs:
 
           path = Path('court-search/output.xlsx')
           if not path.exists():
-              raise SystemExit('❌ 중간 output.xlsx 없음')
+              raise SystemExit('❌ output.xlsx 없음')
           workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
           rows = list(workbook.active.iter_rows(values_only=True))
-          expected = int(os.environ['EXPECTED_COUNT'])
-          if len(rows) - 1 != expected:
-              raise SystemExit(f'중간 결과 행 수 불일치: {len(rows) - 1}/{expected}')
-          target = path.with_name(f"court-search-{os.environ['CHUNK_TAG']}.xlsx")
-          path.replace(target)
-          print(f'✅ 즉시 다운로드 파일 확정: {target} ({expected}건)')
-          PY
-
-      - name: 새 러너 재조회 대상 분리
-        env:
-          CHUNK_TAG: ${{ matrix.tag }}
-        run: >-
-          "$COURT_PYTHON" court-search/chunk_workbook.py retry-input
-          court-search/chunk-input.xlsx
-          "court-search/court-search-$CHUNK_TAG.xlsx"
-          "court-search/retry-input-$CHUNK_TAG.xlsx"
-          "court-search/retry-count-$CHUNK_TAG.txt"
-
-      - name: ${{ matrix.start }}-${{ matrix.end }}번 즉시 다운로드 공개
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: court-search-partial-${{ matrix.tag }}
-          path: court-search/court-search-${{ matrix.tag }}.xlsx
-          if-no-files-found: ignore
-          retention-days: 7
-
-      - name: 새 러너 재조회 요청 보관
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: court-search-retry-input-${{ matrix.tag }}
-          path: |
-            court-search/retry-input-${{ matrix.tag }}.xlsx
-            court-search/retry-count-${{ matrix.tag }}.txt
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: 통과 캡차 학습 후보 확정
-        if: always()
-        run: |
-          mkdir -p court-search/captcha-success/images
-          touch court-search/captcha-success/labels.jsonl
-          echo "통과 확인 샘플: $(wc -l < court-search/captcha-success/labels.jsonl)건"
-
-      - name: 통과 캡차 학습 후보 보관
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: captcha-learning-candidates-${{ matrix.tag }}
-          path: court-search/captcha-success
-          if-no-files-found: error
-          retention-days: 7
-
-  search_retry:
-    name: 새 러너 재조회 ${{ matrix.start }}-${{ matrix.end }}
-    if: ${{ always() && needs.prepare.result == 'success' }}
-    needs: [prepare, search]
-    runs-on: ubuntu-24.04
-    timeout-minutes: 45
-    strategy:
-      fail-fast: false
-      max-parallel: 3
-      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
-
-    steps:
-      - name: 체크아웃
-        uses: actions/checkout@v4
-
-      - name: 재조회 요청 확인
-        uses: actions/download-artifact@v4
-        with:
-          name: court-search-retry-input-${{ matrix.tag }}
-          path: court-search/retry-request
-
-      - name: 재조회 건수 확인
-        id: retry_count
-        env:
-          CHUNK_TAG: ${{ matrix.tag }}
-        run: |
-          count=$(cat "court-search/retry-request/retry-count-$CHUNK_TAG.txt")
-          echo "count=$count" >> "$GITHUB_OUTPUT"
-          echo "새 실행환경 재조회 대상: $count건"
-
-      - name: 기존 묶음 결과 받기
-        uses: actions/download-artifact@v4
-        with:
-          name: court-search-partial-${{ matrix.tag }}
-          path: court-search/retry-primary
-
-      - name: 고속 재조회환경 불러오기
-        id: runtime-cache
-        if: ${{ steps.retry_count.outputs.count != '0' }}
-        uses: actions/cache/restore@v4
-        with:
-          path: |
-            court-search/.runtime-venv
-            court-search/.easyocr-model
-          key: court-search-runtime-v3-cpu-ubuntu-24.04-${{ hashFiles('court-search/requirements.txt') }}
-
-      - name: 캐시 없을 때 재조회환경 준비
-        if: ${{ steps.retry_count.outputs.count != '0' && steps.runtime-cache.outputs.cache-hit != 'true' }}
-        run: |
-          python3 -m venv court-search/.runtime-venv
-          "$COURT_PYTHON" -m pip install --upgrade pip
-          "$COURT_PYTHON" -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-          "$COURT_PYTHON" -m pip install -r court-search/requirements.txt
-          "$COURT_PYTHON" - <<'PY'
-          import easyocr
-          easyocr.Reader(
-              ['en'], gpu=False, verbose=False,
-              model_storage_directory='court-search/.easyocr-model',
-          )
-          PY
-
-      - name: 고속 재조회환경 확인
-        if: ${{ steps.retry_count.outputs.count != '0' }}
-        run: |
-          test -x "$COURT_PYTHON"
-          test -x "$PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
-          "$COURT_PYTHON" -c "import easyocr, openpyxl, playwright; print('고속 일괄 재조회환경 준비 완료')"
-
-      - name: 누적 캡차 모델 불러오기
-        if: ${{ steps.retry_count.outputs.count != '0' }}
-        uses: actions/cache/restore@v4
-        with:
-          path: court-search/captcha-model
-          key: court-captcha-v2-${{ github.run_id }}-retry
-          restore-keys: |
-            court-captcha-v2-
-
-      - name: 실패 사건 새 실행환경 재조회
-        if: ${{ steps.retry_count.outputs.count != '0' }}
-        env:
-          CHUNK_TAG: ${{ matrix.tag }}
-          COURT_WORKERS: ${{ matrix.workers }}
-          OCR_TORCH_THREADS: '2'
-          CAPTCHA_DATA_DIR: court-search/captcha-retry-success
-          CAPTCHA_SEED_DIR: court-search/captcha-model
-          DEBUG_DIR: retry-debug
-          DEBUG_TABLES: '1'
-        run: >-
-          "$COURT_PYTHON" -u court-search/search.py
-          "court-search/retry-request/retry-input-$CHUNK_TAG.xlsx"
-          court-search/retry-output.xlsx
-
-      - name: 최종 묶음 결과 확정
-        if: always()
-        env:
-          CHUNK_TAG: ${{ matrix.tag }}
-          RETRY_COUNT: ${{ steps.retry_count.outputs.count }}
-        run: |
-          mkdir -p court-search/final
-          primary="court-search/retry-primary/court-search-$CHUNK_TAG.xlsx"
-          final="court-search/final/court-search-$CHUNK_TAG.xlsx"
-          if [ "$RETRY_COUNT" != "0" ] && [ -f court-search/retry-output.xlsx ]; then
-            "$COURT_PYTHON" court-search/chunk_workbook.py replace-retry \
-              "$primary" court-search/retry-output.xlsx "$final"
-          else
-            cp "$primary" "$final"
-          fi
-
-      - name: 최종 묶음 결과 보관
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: court-search-final-${{ matrix.tag }}
-          path: court-search/final/court-search-${{ matrix.tag }}.xlsx
-          if-no-files-found: error
-          retention-days: 7
-
-      - name: 재조회 통과 캡차 후보 확정
-        if: always()
-        run: |
-          mkdir -p court-search/captcha-retry-success/images
-          touch court-search/captcha-retry-success/labels.jsonl
-          echo "새 러너 통과 확인 샘플: $(wc -l < court-search/captcha-retry-success/labels.jsonl)건"
-
-      - name: 재조회 통과 캡차 후보 보관
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: captcha-learning-retry-${{ matrix.tag }}
-          path: court-search/captcha-retry-success
-          if-no-files-found: error
-          retention-days: 7
-
-  combine:
-    name: 전체 결과 병합
-    if: always()
-    needs: [prepare, search, search_retry]
-    runs-on: ubuntu-latest
-    steps:
-      - name: 체크아웃
-        uses: actions/checkout@v4
-
-      - name: Python 설정
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-
-      - name: 병합 의존성 설치
-        run: pip install openpyxl==3.1.5
-
-      - name: 완료된 20건 파일 받기
-        uses: actions/download-artifact@v4
-        with:
-          pattern: court-search-final-*
-          path: court-search/chunk-results
-          merge-multiple: true
-
-      - name: 전체 결과 생성
-        env:
-          EXPECTED_TOTAL: ${{ needs.prepare.outputs.total }}
-        run: |
-          python court-search/chunk_workbook.py combine court-search/chunk-results court-search/output.xlsx
-          python - <<'PY'
-          import os
-          import openpyxl
-          workbook = openpyxl.load_workbook('court-search/output.xlsx', read_only=True, data_only=True)
-          actual = workbook.active.max_row - 1
           expected = int(os.environ['EXPECTED_TOTAL'])
+          actual = len(rows) - 1
           if actual != expected:
               raise SystemExit(f'전체 결과 행 수 불일치: {actual}/{expected}')
+          name_column = rows[0].index('사건명')
+          failed = [row[:3] for row in rows[1:]
+                    if not row[name_column] or str(row[name_column]).startswith(('조회실패', '조회보류'))]
+          if failed:
+              print(f'⚠ 실패·보류 {len(failed)}건도 사유를 포함해 결과 파일에 보관합니다: {failed}')
           print(f'✅ 전체 결과 파일 생성: {actual}건')
           PY
 
+      # 사용자가 결과를 먼저 받을 수 있도록 학습보다 앞에서 최종 파일을 공개한다.
       - name: 전체 결과 엑셀 보관
         uses: actions/upload-artifact@v4
         with:
@@ -396,20 +172,11 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      # 결과 파일을 먼저 확정한 뒤에만 통과 캡차를 정식 누적 모델로 승격한다.
-      - name: 기존 누적 캡차 모델 복원
-        uses: actions/cache/restore@v4
-        with:
-          path: court-search/captcha-model
-          key: court-captcha-v2-${{ github.run_id }}
-          restore-keys: |
-            court-captcha-v2-
-
-      - name: 이번 실행의 통과 캡차 후보 받기
-        uses: actions/download-artifact@v4
-        with:
-          pattern: captcha-learning-*
-          path: court-search/captcha-candidates
+      - name: 통과 캡차 학습 후보 확정
+        run: |
+          mkdir -p court-search/captcha-success/images
+          touch court-search/captcha-success/labels.jsonl
+          echo "통과 확인 샘플: $(wc -l < court-search/captcha-success/labels.jsonl)건"
 
       - name: 기존 실행 학습자료 최초 이관
         if: ${{ inputs.captcha_seed_run_id != '' }}
@@ -422,7 +189,7 @@ jobs:
           esac
           gh run download "$SEED_RUN_ID" \
             --repo "$GITHUB_REPOSITORY" \
-            --name court-search-result \
+            --name captcha-learning-model \
             --dir court-search/legacy-captcha
 
       - name: 공식 캡차 학습
@@ -431,13 +198,13 @@ jobs:
         run: |
           args=(
             --baseline court-search/captcha-model
-            --candidate court-search/captcha-candidates
+            --candidate court-search/captcha-success
             --output court-search/captcha-model
           )
-          if [ -n "$SEED_RUN_ID" ]; then
+          if [ -n "$SEED_RUN_ID" ] && [ -d court-search/legacy-captcha ]; then
             args+=(--candidate court-search/legacy-captcha)
           fi
-          python court-search/captcha_training.py "${args[@]}"
+          "$COURT_PYTHON" court-search/captcha_training.py "${args[@]}"
           cat court-search/captcha-model/training-report.json
 
       - name: 누적 캡차 모델 감사자료 보관

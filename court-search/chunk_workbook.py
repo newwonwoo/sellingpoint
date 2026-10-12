@@ -48,6 +48,13 @@ def print_matrix(path: Path):
     print(f"chunk_count={len(chunks)}")
 
 
+def print_count(path: Path):
+    _, rows = input_rows(path)
+    if not rows:
+        raise ValueError("조회할 사건이 없습니다.")
+    print(f"total={len(rows)}")
+
+
 def write_slice(source: Path, target: Path, start: int, end: int):
     header, rows = input_rows(source)
     selected = rows[start - 1:end]
@@ -168,6 +175,9 @@ def main():
     matrix_parser = subparsers.add_parser("matrix")
     matrix_parser.add_argument("input", type=Path)
 
+    count_parser = subparsers.add_parser("count")
+    count_parser.add_argument("input", type=Path)
+
     slice_parser = subparsers.add_parser("slice")
     slice_parser.add_argument("input", type=Path)
     slice_parser.add_argument("output", type=Path)
@@ -192,6 +202,8 @@ def main():
     args = parser.parse_args()
     if args.command == "matrix":
         print_matrix(args.input)
+    elif args.command == "count":
+        print_count(args.input)
     elif args.command == "slice":
         write_slice(args.input, args.output, args.start, args.end)
     elif args.command == "combine":

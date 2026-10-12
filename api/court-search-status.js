@@ -36,12 +36,10 @@ export default async function handler(req, res) {
     '캐시 없을 때 재조회환경 준비': '재조회 환경 캐시가 없어 이번 한 번만 조회 도구를 설치하고 있습니다.',
     '고속 재조회환경 확인': '재조회용 브라우저와 캡차 인식 도구가 정상인지 확인하고 있습니다.',
     '입력 파일 확인': '업로드한 사건번호 파일의 형식을 확인하고 있습니다.',
-    '20건 단위 작업 계획': '사건번호를 20건 단위로 나누고 있습니다.',
-    '중간 결과 파일 확정': '완료된 묶음의 엑셀 파일을 만들고 있습니다.',
-    '새 러너 재조회 대상 분리': '실패·보류 사건을 새 실행환경에서 다시 조회하도록 분리하고 있습니다.',
-    '실패 사건 새 실행환경 재조회': '기존 연결과 다른 새 실행환경에서 실패 사건을 다시 조회하고 있습니다.',
-    '최종 묶음 결과 확정': '새 실행환경의 재조회 결과를 기존 결과에 반영하고 있습니다.',
-    '전체 결과 생성': '완료된 묶음 파일을 입력 순서대로 합치고 있습니다.',
+    '조회 건수 확인': '전체 사건 수를 확인하고 한 실행환경에 작업을 준비하고 있습니다.',
+    '중간 다운로드 도구 준비': '20건씩 완료 결과를 공개할 도구를 준비하고 있습니다.',
+    '사건검색 실행': '3개 브라우저 워커가 완료되는 순서대로 다음 사건을 조회하고 있습니다.',
+    '결과 파일 생성 확인': '전체 결과의 건수와 파일 상태를 확인하고 있습니다.',
     '전체 결과 엑셀 보관': '전체 결과를 웹앱에서 받을 수 있도록 보관하고 있습니다.',
     '기존 누적 캡차 모델 복원': '이전 실행에서 검증된 캡차 학습 모델을 불러오고 있습니다.',
     '이번 실행의 통과 캡차 후보 받기': '이번 조회에서 실제 통과한 캡차만 모으고 있습니다.',
@@ -104,7 +102,9 @@ export default async function handler(req, res) {
           .map((job) => job.name);
         expectedCases = jobs.reduce((maximum, candidate) => {
           const match = String(candidate.name || '').match(/^사건 (\d+)-(\d+) 조회$/);
-          return match ? Math.max(maximum, Number(match[2])) : maximum;
+          const fullMatch = String(candidate.name || '').match(/^전체 (\d+)건 조회$/);
+          if (match) return Math.max(maximum, Number(match[2]));
+          return fullMatch ? Math.max(maximum, Number(fullMatch[1])) : maximum;
         }, 0);
         const job = jobs.find((candidate) => candidate.status === 'in_progress') || jobs.at(-1);
         steps = (job?.steps || []).map((step) => ({ name: step.name, status: step.status, conclusion: step.conclusion }));
@@ -126,22 +126,33 @@ export default async function handler(req, res) {
         { Authorization: `token ${GITHUB_TOKEN}`, Accept: 'application/vnd.github.v3+json' },
       );
       if (artifacts) {
-        partialResults = artifacts.flatMap((artifact) => {
-          const match = artifact.name.match(/^court-search-partial-(\d+)-(\d+)$/);
-          if (!match || artifact.expired) return [];
-          const start = Number(match[1]);
-          const end = Number(match[2]);
-          return [{
+        const byRange = new Map();
+        for (const artifact of artifacts) {
+          const match = artifact.name.match(/^court-search-partial-(?:r(\d+)-)?(\d+)-(\d+)$/);
+          if (!match || artifact.expired) continue;
+          const revision = Number(match[1] || 0);
+          const start = Number(match[2]);
+          const end = Number(match[3]);
+          const item = {
             artifactId: String(artifact.id),
             name: artifact.name,
             filename: `court-search-${String(start).padStart(4, '0')}-${String(end).padStart(4, '0')}.xlsx`,
+            revision,
             start,
             end,
             count: end - start + 1,
             size: artifact.size_in_bytes,
             createdAt: artifact.created_at,
-          }];
-        }).sort((a, b) => a.start - b.start);
+          };
+          const key = `${start}-${end}`;
+          const previous = byRange.get(key);
+          if (!previous || item.revision > previous.revision
+            || (item.revision === previous.revision
+              && new Date(item.createdAt) > new Date(previous.createdAt))) {
+            byRange.set(key, item);
+          }
+        }
+        partialResults = [...byRange.values()].sort((a, b) => a.start - b.start);
       }
     } catch {
       // 중간 파일 목록 실패가 실행 상태 조회를 막지는 않는다.

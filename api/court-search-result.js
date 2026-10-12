@@ -77,18 +77,26 @@ function rowCount(buffer) {
 }
 
 function parsePartialArtifact(artifact) {
-  const match = artifact.name.match(/^court-search-partial-(\d+)-(\d+)$/);
+  const match = artifact.name.match(/^court-search-partial-(?:r(\d+)-)?(\d+)-(\d+)$/);
   if (!match || artifact.expired) return null;
-  const start = Number(match[1]);
-  const end = Number(match[2]);
-  return { ...artifact, start, end, count: end - start + 1 };
+  const revision = Number(match[1] || 0);
+  const start = Number(match[2]);
+  const end = Number(match[3]);
+  return { ...artifact, revision, start, end, count: end - start + 1 };
 }
 
 function uniqueSortedPartials(artifacts) {
   const byRange = new Map();
   for (const artifact of artifacts) {
     const partial = parsePartialArtifact(artifact);
-    if (partial) byRange.set(`${partial.start}-${partial.end}`, partial);
+    if (!partial) continue;
+    const key = `${partial.start}-${partial.end}`;
+    const previous = byRange.get(key);
+    if (!previous || partial.revision > previous.revision
+      || (partial.revision === previous.revision
+        && new Date(partial.created_at) > new Date(previous.created_at))) {
+      byRange.set(key, partial);
+    }
   }
   return [...byRange.values()].sort((a, b) => a.start - b.start);
 }
@@ -111,7 +119,9 @@ async function expectedCaseCount(repo, runId, token) {
   );
   return jobs.reduce((maximum, job) => {
     const match = String(job.name || '').match(/^사건 (\d+)-(\d+) 조회$/);
-    return match ? Math.max(maximum, Number(match[2])) : maximum;
+    const fullMatch = String(job.name || '').match(/^전체 (\d+)건 조회$/);
+    if (match) return Math.max(maximum, Number(match[2]));
+    return fullMatch ? Math.max(maximum, Number(fullMatch[1])) : maximum;
   }, 0);
 }
 

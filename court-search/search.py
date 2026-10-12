@@ -746,6 +746,106 @@ def write_output(results: list[dict], path: str):
     print(f"\n✅ 결과 저장: {path} ({len(results)}건)")
 
 
+class PartialResultPublisher:
+    """완료된 입력 순서 구간을 검색과 별도인 업로드 큐에서 공개한다."""
+
+    def __init__(self, results: list[dict]):
+        self.results = results
+        self.total = len(results)
+        output_dir = os.environ.get('COURT_PARTIAL_DIR', '').strip()
+        self.output_dir = Path(output_dir) if output_dir else None
+        self.uploader = os.environ.get('COURT_ARTIFACT_UPLOADER', '').strip()
+        try:
+            self.chunk_size = max(1, int(os.environ.get('COURT_PARTIAL_SIZE', '20')))
+        except ValueError:
+            self.chunk_size = 20
+        self.enabled = bool(self.output_dir and self.uploader)
+        self.next_start = 0
+        self.queue = asyncio.Queue()
+        self.lock = asyncio.Lock()
+        self.worker_task = None
+        self.failures = []
+
+    async def start(self):
+        if not self.enabled:
+            return
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.worker_task = asyncio.create_task(self._upload_worker())
+        print(f"중간 결과: {self.chunk_size}건 단위로 다운로드 파일을 공개합니다.")
+
+    async def publish_ready(self):
+        """앞쪽 입력 구간이 모두 끝난 경우에만 순서가 보장된 파일을 만든다."""
+        if not self.enabled:
+            return
+        async with self.lock:
+            while self.next_start < self.total:
+                end = min(self.next_start + self.chunk_size, self.total)
+                chunk = self.results[self.next_start:end]
+                if not all(chunk):
+                    return
+                await self._write_and_enqueue(self.next_start, end, chunk, revision=0)
+                self.next_start = end
+
+    async def publish_revisions(self, changed_indices: list[int]):
+        """마지막 재조회로 바뀐 구간을 새 artifact 이름으로 다시 공개한다."""
+        if not self.enabled or not changed_indices:
+            return
+        starts = sorted({(index // self.chunk_size) * self.chunk_size for index in changed_indices})
+        async with self.lock:
+            for start in starts:
+                end = min(start + self.chunk_size, self.total)
+                chunk = self.results[start:end]
+                if all(chunk):
+                    await self._write_and_enqueue(start, end, chunk, revision=1)
+
+    async def _write_and_enqueue(self, start, end, chunk, revision):
+        tag = f"{start + 1:04d}-{end:04d}"
+        suffix = f"-r{revision}" if revision else ''
+        path = self.output_dir / f"court-search-{tag}{suffix}.xlsx"
+        await asyncio.to_thread(write_output, [dict(row) for row in chunk], str(path))
+        revision_tag = f"r{revision}-" if revision else ''
+        artifact_name = f"court-search-partial-{revision_tag}{tag}"
+        self.queue.put_nowait((artifact_name, path))
+
+    async def _upload_worker(self):
+        while True:
+            item = await self.queue.get()
+            try:
+                if item is None:
+                    return
+                artifact_name, path = item
+                try:
+                    process = await asyncio.create_subprocess_exec(
+                        'node', self.uploader, artifact_name, str(path),
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.STDOUT,
+                    )
+                    output, _ = await process.communicate()
+                    message = output.decode('utf-8', errors='replace').strip()
+                    if message:
+                        print(message)
+                    if process.returncode:
+                        self.failures.append(artifact_name)
+                except Exception as error:
+                    print(f"❌ 중간 결과 업로드 실행 실패: {artifact_name}: {error}")
+                    self.failures.append(artifact_name)
+            finally:
+                self.queue.task_done()
+
+    async def close(self):
+        if not self.enabled:
+            return
+        await self.publish_ready()
+        await self.queue.join()
+        self.queue.put_nowait(None)
+        await self.worker_task
+        if self.failures:
+            print(
+                "⚠ 중간 다운로드 공개 실패: " + ', '.join(self.failures)
+                + " — 최종 결과 파일 생성은 계속합니다."
+            )
+
+
 # ──────────────────────────────────────────────
 # 메인
 # ──────────────────────────────────────────────
@@ -781,6 +881,8 @@ async def main():
     print(f"조회 워커 {worker_count}개로 실행합니다.")
 
     results = [{} for _ in cases]
+    partial_publisher = PartialResultPublisher(results)
+    await partial_publisher.start()
     connection_circuit = {
         'consecutive_failures': 0,
         'event': asyncio.Event(),
@@ -854,6 +956,8 @@ async def main():
                             ocr_executor,
                             connection_circuit,
                         )
+                        if not retry:
+                            await partial_publisher.publish_ready()
                     finally:
                         queue.task_done()
 
@@ -877,6 +981,7 @@ async def main():
                     '사건명': '조회보류: 법원 사이트 접속 불가',
                     '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
                 }
+            await partial_publisher.publish_ready()
             print(
                 f"\n⛔ 사이트 첫 화면이 {MAX_GLOBAL_CONNECTION_FAILURES}회 연속 "
                 f"열리지 않아 남은 {deferred}건을 조회보류로 저장합니다."
@@ -893,11 +998,13 @@ async def main():
             if failed:
                 print(f"\n실패 사건 재조회 시작: {len(failed)}건 (각 사건 1회)")
                 await run_batch(failed, retry=True)
+                await partial_publisher.publish_revisions(failed)
 
         await browser.close()
     ocr_executor.shutdown(wait=True)
 
     write_output(results, output_path)
+    await partial_publisher.close()
 
 
 if __name__ == '__main__':

@@ -1,0 +1,9 @@
+{
+  "name": "court-search-artifact-uploader",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Upload in-progress court search result chunks from a running GitHub Actions step.",
+  "dependencies": {
+    "@actions/artifact": "6.3.1"
+  }
+}
