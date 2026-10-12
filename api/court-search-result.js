@@ -233,7 +233,8 @@ export default async function handler(req, res) {
     const expectedTotal = await expectedCaseCount(repo, runId, token);
     if (!expectedTotal) return res.status(409).json({ error: '전체 조회 건수를 아직 확인할 수 없습니다.' });
 
-    const fullArtifact = artifacts.find((item) => item.name === 'court-search-result' && !item.expired);
+    const fullArtifact = artifacts.find((item) => item.name === 'court-search-result-retry' && !item.expired)
+      || artifacts.find((item) => item.name === 'court-search-result' && !item.expired);
     if (fullArtifact) {
       const output = await downloadArtifactXlsx(fullArtifact, token);
       const count = rowCount(output);

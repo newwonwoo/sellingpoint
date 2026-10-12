@@ -759,6 +759,10 @@ class PartialResultPublisher:
             self.chunk_size = max(1, int(os.environ.get('COURT_PARTIAL_SIZE', '20')))
         except ValueError:
             self.chunk_size = 20
+        try:
+            self.revision_base = max(0, int(os.environ.get('COURT_PARTIAL_REVISION', '0')))
+        except ValueError:
+            self.revision_base = 0
         self.enabled = bool(self.output_dir and self.uploader)
         self.next_start = 0
         self.queue = asyncio.Queue()
@@ -783,7 +787,9 @@ class PartialResultPublisher:
                 chunk = self.results[self.next_start:end]
                 if not all(chunk):
                     return
-                await self._write_and_enqueue(self.next_start, end, chunk, revision=0)
+                await self._write_and_enqueue(
+                    self.next_start, end, chunk, revision=self.revision_base
+                )
                 self.next_start = end
 
     async def publish_revisions(self, changed_indices: list[int]):
@@ -796,7 +802,9 @@ class PartialResultPublisher:
                 end = min(start + self.chunk_size, self.total)
                 chunk = self.results[start:end]
                 if all(chunk):
-                    await self._write_and_enqueue(start, end, chunk, revision=1)
+                    await self._write_and_enqueue(
+                        start, end, chunk, revision=self.revision_base + 1
+                    )
 
     async def _write_and_enqueue(self, start, end, chunk, revision):
         tag = f"{start + 1:04d}-{end:04d}"

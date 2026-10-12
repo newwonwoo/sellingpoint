@@ -71,6 +71,8 @@ jobs:
     needs: prepare
     runs-on: ubuntu-24.04
     timeout-minutes: 180
+    outputs:
+      global_connection_failure: ${{ steps.inspect.outputs.global_connection_failure }}
     steps:
       - name: 체크아웃
         uses: actions/checkout@v4
@@ -137,6 +139,7 @@ jobs:
           "$COURT_PYTHON" -u court-search/search.py "${args[@]}"
 
       - name: 결과 파일 생성 확인
+        id: inspect
         env:
           EXPECTED_TOTAL: ${{ needs.prepare.outputs.total }}
           PREPARE_ONLY: ${{ inputs.prepare_only }}
@@ -158,8 +161,16 @@ jobs:
           name_column = rows[0].index('사건명')
           failed = [row[:3] for row in rows[1:]
                     if not row[name_column] or str(row[name_column]).startswith(('조회실패', '조회보류'))]
+          connection_failures = [row for row in rows[1:] if str(row[name_column]).startswith((
+              '조회실패: 법원 사이트', '조회보류: 법원 사이트'
+          ))]
+          global_connection_failure = actual > 0 and len(connection_failures) == actual
+          with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
+              print(f"global_connection_failure={'true' if global_connection_failure else 'false'}", file=output)
           if failed:
               print(f'⚠ 실패·보류 {len(failed)}건도 사유를 포함해 결과 파일에 보관합니다: {failed}')
+          if global_connection_failure:
+              print('⚠ 첫 실행기 전체가 법원 사이트에 연결되지 않아 새 실행기 재조회를 예약합니다.')
           print(f'✅ 전체 결과 파일 생성: {actual}건')
           PY
 
@@ -173,10 +184,180 @@ jobs:
           retention-days: 7
 
       - name: 통과 캡차 학습 후보 확정
+        if: ${{ steps.inspect.outputs.global_connection_failure != 'true' }}
         run: |
           mkdir -p court-search/captcha-success/images
           touch court-search/captcha-success/labels.jsonl
           echo "통과 확인 샘플: $(wc -l < court-search/captcha-success/labels.jsonl)건"
+
+      - name: 기존 실행 학습자료 최초 이관
+        if: ${{ steps.inspect.outputs.global_connection_failure != 'true' && inputs.captcha_seed_run_id != '' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SEED_RUN_ID: ${{ inputs.captcha_seed_run_id }}
+        run: |
+          case "$SEED_RUN_ID" in
+            *[!0-9]*|'') echo "올바르지 않은 seed run ID"; exit 1 ;;
+          esac
+          gh run download "$SEED_RUN_ID" \
+            --repo "$GITHUB_REPOSITORY" \
+            --name captcha-learning-model \
+            --dir court-search/legacy-captcha
+
+      - name: 공식 캡차 학습
+        if: ${{ steps.inspect.outputs.global_connection_failure != 'true' }}
+        env:
+          SEED_RUN_ID: ${{ inputs.captcha_seed_run_id }}
+        run: |
+          args=(
+            --baseline court-search/captcha-model
+            --candidate court-search/captcha-success
+            --output court-search/captcha-model
+          )
+          if [ -n "$SEED_RUN_ID" ] && [ -d court-search/legacy-captcha ]; then
+            args+=(--candidate court-search/legacy-captcha)
+          fi
+          "$COURT_PYTHON" court-search/captcha_training.py "${args[@]}"
+          cat court-search/captcha-model/training-report.json
+
+      - name: 누적 캡차 모델 감사자료 보관
+        if: ${{ steps.inspect.outputs.global_connection_failure != 'true' && (inputs.prepare_only == false || inputs.captcha_seed_run_id != '') }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: captcha-learning-model
+          path: court-search/captcha-model
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 다음 실행용 누적 캡차 모델 저장
+        if: ${{ steps.inspect.outputs.global_connection_failure != 'true' && (inputs.prepare_only == false || inputs.captcha_seed_run_id != '') }}
+        uses: actions/cache/save@v4
+        with:
+          path: court-search/captcha-model
+          key: court-captcha-v2-${{ github.run_id }}
+
+      - name: 완료 요약
+        if: always()
+        run: |
+          if [ -f court-search/output.xlsx ]; then
+            ls -lh court-search/output.xlsx
+          else
+            echo "output.xlsx 없음 — 공개된 중간 결과를 확인하세요."
+          fi
+          if [ -f court-search/captcha-model/training-report.json ]; then
+            echo "캡차 학습 결과:"
+            cat court-search/captcha-model/training-report.json
+          fi
+
+  search_fallback:
+    name: 새 실행기 전체 ${{ needs.prepare.outputs.total }}건 재조회
+    needs: [prepare, search]
+    if: ${{ needs.search.outputs.global_connection_failure == 'true' && inputs.prepare_only == false }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    steps:
+      - name: 체크아웃
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 고속 재조회환경 불러오기
+        id: runtime-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            court-search/.runtime-venv
+            court-search/.easyocr-model
+          key: court-search-runtime-v3-cpu-ubuntu-24.04-${{ hashFiles('court-search/requirements.txt') }}
+
+      - name: 캐시 없을 때 재조회환경 준비
+        if: ${{ steps.runtime-cache.outputs.cache-hit != 'true' }}
+        run: |
+          python3 -m venv court-search/.runtime-venv
+          "$COURT_PYTHON" -m pip install --upgrade pip
+          "$COURT_PYTHON" -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          "$COURT_PYTHON" -m pip install -r court-search/requirements.txt
+          "$COURT_PYTHON" - <<'PY'
+          import easyocr
+          easyocr.Reader(
+              ['en'], gpu=False, verbose=False,
+              model_storage_directory='court-search/.easyocr-model',
+          )
+          PY
+
+      - name: 고속 재조회환경 확인
+        run: |
+          test -x "$COURT_PYTHON"
+          test -x "$PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
+          "$COURT_PYTHON" -c "import easyocr, openpyxl, playwright; print('고속 일괄 재조회환경 준비 완료')"
+
+      - name: 중간 다운로드 도구 준비
+        run: npm ci --prefix court-search/artifact-uploader --omit=dev --no-audit --no-fund
+
+      - name: 누적 캡차 모델 불러오기
+        uses: actions/cache/restore@v4
+        with:
+          path: court-search/captcha-model
+          key: court-captcha-v2-${{ github.run_id }}
+          restore-keys: |
+            court-captcha-v2-
+
+      - name: 새 실행기 전체 사건 재조회
+        env:
+          INPUT_FILE: ${{ inputs.input_file }}
+          COURT_WORKERS: '3'
+          OCR_TORCH_THREADS: '2'
+          CAPTCHA_DATA_DIR: court-search/captcha-success
+          CAPTCHA_SEED_DIR: court-search/captcha-model
+          DEBUG_DIR: court-search/debug
+          DEBUG_TABLES: '1'
+          COURT_PARTIAL_SIZE: '20'
+          COURT_PARTIAL_REVISION: '2'
+          COURT_PARTIAL_DIR: court-search/partial-results
+          COURT_ARTIFACT_UPLOADER: court-search/artifact-uploader/upload.mjs
+        run: >-
+          "$COURT_PYTHON" -u court-search/search.py
+          "court-search/$INPUT_FILE" court-search/output.xlsx
+
+      - name: 재조회 결과 파일 생성 확인
+        env:
+          EXPECTED_TOTAL: ${{ needs.prepare.outputs.total }}
+        run: |
+          "$COURT_PYTHON" - <<'PY'
+          import os
+          import openpyxl
+          from pathlib import Path
+
+          path = Path('court-search/output.xlsx')
+          if not path.exists():
+              raise SystemExit('❌ 재조회 output.xlsx 없음')
+          workbook = openpyxl.load_workbook(path, read_only=True, data_only=True)
+          rows = list(workbook.active.iter_rows(values_only=True))
+          expected = int(os.environ['EXPECTED_TOTAL'])
+          actual = len(rows) - 1
+          if actual != expected:
+              raise SystemExit(f'재조회 결과 행 수 불일치: {actual}/{expected}')
+          name_column = rows[0].index('사건명')
+          failed = [row[:3] for row in rows[1:]
+                    if not row[name_column] or str(row[name_column]).startswith(('조회실패', '조회보류'))]
+          if failed:
+              print(f'⚠ 새 실행기에서도 실패·보류 {len(failed)}건 — 사유를 결과에 보관합니다: {failed}')
+          print(f'✅ 새 실행기 전체 결과 파일 생성: {actual}건')
+          PY
+
+      - name: 재조회 전체 결과 엑셀 보관
+        uses: actions/upload-artifact@v4
+        with:
+          name: court-search-result-retry
+          path: court-search/output.xlsx
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: 재조회 통과 캡차 학습 후보 확정
+        run: |
+          mkdir -p court-search/captcha-success/images
+          touch court-search/captcha-success/labels.jsonl
+          echo "새 실행기 통과 확인 샘플: $(wc -l < court-search/captcha-success/labels.jsonl)건"
 
       - name: 기존 실행 학습자료 최초 이관
         if: ${{ inputs.captcha_seed_run_id != '' }}
@@ -208,7 +389,6 @@ jobs:
           cat court-search/captcha-model/training-report.json
 
       - name: 누적 캡차 모델 감사자료 보관
-        if: ${{ inputs.prepare_only == false || inputs.captcha_seed_run_id != '' }}
         uses: actions/upload-artifact@v4
         with:
           name: captcha-learning-model
@@ -217,19 +397,18 @@ jobs:
           retention-days: 30
 
       - name: 다음 실행용 누적 캡차 모델 저장
-        if: ${{ inputs.prepare_only == false || inputs.captcha_seed_run_id != '' }}
         uses: actions/cache/save@v4
         with:
           path: court-search/captcha-model
           key: court-captcha-v2-${{ github.run_id }}
 
-      - name: 완료 요약
+      - name: 재조회 완료 요약
         if: always()
         run: |
           if [ -f court-search/output.xlsx ]; then
             ls -lh court-search/output.xlsx
           else
-            echo "output.xlsx 없음 — 공개된 중간 결과를 확인하세요."
+            echo "재조회 output.xlsx 없음"
           fi
           if [ -f court-search/captcha-model/training-report.json ]; then
             echo "캡차 학습 결과:"
