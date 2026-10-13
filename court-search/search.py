@@ -580,7 +580,13 @@ def parse_direct_api_result(
         row = row or {}
         data[f'진행_{slot}일자'] = format_court_date(row.get('progYmd'))
         data[f'진행_{slot}내용'] = str(row.get('progCtt') or '')
-        data[f'진행_{slot}결과'] = str(row.get('progRslt') or '')
+        progress_result = str(row.get('progRslt') or '')
+        # 법원 화면은 송달(구분 4)의 실제 도달일을 기본으로 숨기고,
+        # 사용자가 '확인'을 체크하도록 안내한다. 기존 DOM 파서와
+        # 같은 출력을 유지해 실험 경로에서 데이터가 바뀌지 않게 한다.
+        if str(row.get('progCttDvs') or '') == '4' and progress_result:
+            progress_result = "위의 '확인' 항목 체크"
+        data[f'진행_{slot}결과'] = progress_result
         notice = row.get('pntcImg')
         data[f'진행_{slot}공시문'] = (
             str(notice) if notice not in (None, '', 'N', 'Y', 0, 1) else ''

@@ -44,7 +44,8 @@ class DirectApiParserTests(unittest.TestCase):
                     {
                         'progYmd': '20260828',
                         'progCtt': '결정정본 송달',
-                        'progRslt': "위의 '확인' 항목 체크",
+                        'progRslt': '2026.08.28 도달',
+                        'progCttDvs': '4',
                     },
                     {'progYmd': '20260829', 'progCtt': '확정'},
                 ]
@@ -68,6 +69,7 @@ class DirectApiParserTests(unittest.TestCase):
         self.assertEqual(result['피신청인'], '1. 김OO')
         self.assertEqual(result['진행_1내용'], '확정')
         self.assertEqual(result['진행_2내용'], '결정정본 송달')
+        self.assertEqual(result['진행_2결과'], "위의 '확인' 항목 체크")
         self.assertEqual(result['진행_3내용'], '결정')
 
 
