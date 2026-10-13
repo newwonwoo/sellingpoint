@@ -20,6 +20,11 @@ on:
         type: boolean
         required: false
         default: true
+      speed_experiment:
+        description: '성능실험 기능 활성화 (테스트 브랜치 전용)'
+        type: boolean
+        required: false
+        default: false
       captcha_seed_run_id:
         description: '기존 실행의 통과 캡차를 최초 모델로 가져올 run ID (선택)'
         type: string
@@ -163,6 +168,9 @@ jobs:
           COURT_WORKERS: '3'
           COURT_MAX_WORKERS: '4'
           OCR_TORCH_THREADS: '2'
+          COURT_REUSE_SESSION: ${{ inputs.speed_experiment }}
+          CAPTCHA_FAST_PATH: ${{ inputs.speed_experiment }}
+          COURT_IMMEDIATE_RETRY: ${{ inputs.speed_experiment }}
           CAPTCHA_DATA_DIR: court-search/captcha-success
           CAPTCHA_SEED_DIR: court-search/captcha-model
           DEBUG_DIR: court-search/debug
@@ -379,6 +387,9 @@ jobs:
           COURT_WORKERS: '3'
           COURT_MAX_WORKERS: '4'
           OCR_TORCH_THREADS: '2'
+          COURT_REUSE_SESSION: ${{ inputs.speed_experiment }}
+          CAPTCHA_FAST_PATH: ${{ inputs.speed_experiment }}
+          COURT_IMMEDIATE_RETRY: ${{ inputs.speed_experiment }}
           CAPTCHA_DATA_DIR: court-search/captcha-success
           CAPTCHA_SEED_DIR: court-search/captcha-model
           DEBUG_DIR: court-search/debug

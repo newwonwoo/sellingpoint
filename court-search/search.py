@@ -17,6 +17,7 @@ import socket
 import threading
 from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 from pathlib import Path
 from datetime import datetime
 
@@ -24,7 +25,12 @@ import openpyxl
 from playwright.async_api import async_playwright, Page, TimeoutError as PlaywrightTimeout
 
 sys.path.insert(0, os.path.dirname(__file__))
-from captcha_solver import learn_success, load_success_dataset, predict_captcha
+from captcha_solver import (
+    learn_success,
+    load_success_dataset,
+    predict_captcha,
+    warmup_captcha_solver,
+)
 from output_schema import OUTPUT_HEADERS, write_output
 
 # ──────────────────────────────────────────────
@@ -42,6 +48,15 @@ MAX_CONNECTION_RETRY = 3
 # 접속 장애로 본다. 남은 수백 건을 같은 방식으로 소진하지 않기 위한 값이다.
 MAX_GLOBAL_CONNECTION_FAILURES = 3
 HEADLESS = True
+
+
+def env_enabled(name: str) -> bool:
+    return os.environ.get(name, '').strip().lower() in {'1', 'true', 'yes', 'on'}
+
+
+REUSE_SEARCH_SESSION = env_enabled('COURT_REUSE_SESSION')
+FAST_CAPTCHA_PATH = env_enabled('CAPTCHA_FAST_PATH')
+IMMEDIATE_RETRY_WORKER = env_enabled('COURT_IMMEDIATE_RETRY')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INPUT_FILE = os.path.join(BASE_DIR, 'input.xlsx')
@@ -190,22 +205,27 @@ def parse_case_no(case_no: str):
 # 신규 사이트 캡차 처리 (blob URL → 요소 screenshot)
 # ──────────────────────────────────────────────
 async def run_captcha_ocr(
-    img_bytes: bytes, executor: ThreadPoolExecutor | None
+    img_bytes: bytes,
+    executor: ThreadPoolExecutor | None,
+    fast_path: bool = False,
 ) -> str | None:
     """CPU OCR를 전용 스레드에서 실행해 다른 브라우저 워커를 막지 않는다."""
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(executor, predict_captcha, img_bytes)
+    task = partial(predict_captcha, img_bytes, fast_path=fast_path)
+    return await loop.run_in_executor(executor, task)
 
 
 async def get_captcha_answer(
-    page: Page, executor: ThreadPoolExecutor | None
+    page: Page,
+    executor: ThreadPoolExecutor | None,
+    fast_path: bool = False,
 ) -> tuple[str | None, bytes | None, str]:
     """캡차 요소를 우선 읽고, 실패하면 렌더링 화면 영역을 저배율로 재캡처한다."""
     try:
         captcha_el = page.locator(SEL_CAPTCHA_IMG)
         await captcha_el.wait_for(timeout=5000)
         img_bytes = await captcha_el.screenshot(animations='disabled')
-        answer = await run_captcha_ocr(img_bytes, executor)
+        answer = await run_captcha_ocr(img_bytes, executor, fast_path)
         if answer:
             return answer, img_bytes, 'element'
 
@@ -214,7 +234,7 @@ async def get_captcha_answer(
         box = await captcha_el.bounding_box()
         if box:
             rendered_bytes = await page.screenshot(clip=box, scale='css')
-            answer = await run_captcha_ocr(rendered_bytes, executor)
+            answer = await run_captcha_ocr(rendered_bytes, executor, fast_path)
             if answer:
                 print('  캡차 화면 캡처 보조 인식 성공')
             return answer, rendered_bytes, 'rendered'
@@ -252,16 +272,80 @@ def save_success_captcha(img_bytes: bytes, answer: str, source: str):
     )
 
 
+async def search_form_ready(page: Page) -> bool:
+    """현재 WebSquare 검색 폼을 즉시 사용할 수 있는지 확인한다."""
+    try:
+        court = page.locator(SEL_COURT)
+        return await court.count() > 0 and await court.first.is_visible()
+    except Exception:
+        return False
+
+
+async def return_to_search_form(page: Page, timeout_ms: int = 6000) -> bool:
+    """결과 화면에서 전체 앱을 다시 열지 않고 검색 폼으로 돌아간다."""
+    if await search_form_ready(page):
+        return True
+
+    clicked = False
+    for frame in page.frames:
+        try:
+            clicked = await frame.evaluate("""
+                () => {
+                  const visible = element => !!(
+                    element.offsetWidth || element.offsetHeight ||
+                    element.getClientRects().length
+                  );
+                  const candidates = [...document.querySelectorAll(
+                    'button, a, input, [role="button"]'
+                  )];
+                  const target = candidates.find(element => {
+                    const text = (element.textContent || '').replace(/\\s+/g, ' ').trim();
+                    const value = (element.value || '').replace(/\\s+/g, ' ').trim();
+                    return visible(element) && (text === '검색화면' || value === '검색화면');
+                  });
+                  if (!target) return false;
+                  target.click();
+                  return true;
+                }
+            """)
+            if clicked:
+                break
+        except Exception:
+            continue
+    if not clicked:
+        return False
+
+    try:
+        await page.wait_for_function(
+            '(selector) => {'
+            ' const element = document.querySelector(selector);'
+            ' return !!element && !!(element.offsetWidth || element.offsetHeight ||'
+            ' element.getClientRects().length);'
+            '}',
+            arg=SEL_COURT,
+            timeout=timeout_ms,
+        )
+        return True
+    except Exception:
+        return False
+
+
 # ──────────────────────────────────────────────
 # WebSquare select 선택 (일반 select_option 미작동 시 JS 폴백)
 # ──────────────────────────────────────────────
 async def ws_select(page: Page, selector: str, value: str):
     """WebSquare select 요소를 실제 옵션 값 또는 표시명으로 선택"""
     try:
+        if await page.locator(selector).input_value() == value:
+            return False
+    except Exception:
+        pass
+    try:
         await page.select_option(selector, value=value)
     except Exception:
         await page.select_option(selector, label=value)
     await page.wait_for_timeout(300)
+    return True
 
 
 async def select_court(page: Page, court: str):
@@ -285,9 +369,16 @@ async def select_court(page: Page, court: str):
     matches = list({o['value']: o for o in matches}.values())
     if len(matches) != 1:
         raise ValueError(f'법원 선택 불가 또는 중복: {court} ({matches})')
+    try:
+        if await page.locator(SEL_COURT).input_value() == matches[0]['value']:
+            print(f"  법원 선택 유지: {matches[0]['label']}")
+            return False
+    except Exception:
+        pass
     await page.select_option(SEL_COURT, value=matches[0]['value'])
     print(f"  법원 선택 확인: {matches[0]['label']}")
     await page.wait_for_timeout(300)
+    return True
 
 
 # ──────────────────────────────────────────────
@@ -552,6 +643,7 @@ async def search_one(
     prepare_only: bool = False,
     ocr_executor: ThreadPoolExecutor | None = None,
     connection_circuit: dict | None = None,
+    session_state: dict | None = None,
 ) -> dict:
     print(f"  조회: {court} / {case_no}")
 
@@ -560,6 +652,31 @@ async def search_one(
     stage = '사이트 접속'
     failure_reason = '재시도 한도 초과'
     connection_failures = 0
+    if session_state is None:
+        session_state = {}
+    reuse_enabled = REUSE_SEARCH_SESSION and not prepare_only
+
+    async def finish(data: dict, result_page: bool = False) -> dict:
+        """결과를 반환하기 전에 다음 사건이 같은 앱 세션을 쓰도록 준비한다."""
+        if not reuse_enabled:
+            return data
+        if result_page:
+            ready = await return_to_search_form(page)
+            session_state['form_ready'] = ready
+            if ready:
+                session_state['reuse_prepared'] = (
+                    int(session_state.get('reuse_prepared', 0)) + 1
+                )
+                print('  ♻ 검색 세션 유지 — 다음 사건은 첫 화면 재접속 생략')
+            else:
+                session_state['reuse_fallbacks'] = (
+                    int(session_state.get('reuse_fallbacks', 0)) + 1
+                )
+                print('  ↪ 검색화면 복귀 실패 — 다음 사건은 첫 화면에서 재시작')
+        else:
+            session_state['form_ready'] = await search_form_ready(page)
+        return data
+
     if connection_circuit is None:
         connection_circuit = {
             'consecutive_failures': 0,
@@ -567,6 +684,12 @@ async def search_one(
             'diagnosed': False,
         }
     circuit_event = connection_circuit['event']
+
+    if reuse_enabled and await search_form_ready(page):
+        page_ready = True
+        session_state['form_ready'] = True
+        session_state['reuse_hits'] = int(session_state.get('reuse_hits', 0)) + 1
+        print('  ♻ 기존 검색 세션 재사용')
 
     for attempt in range(1, (1 if prepare_only else MAX_CAPTCHA_RETRY) + 1):
         try:
@@ -579,6 +702,10 @@ async def search_one(
                     break
                 print(f"  단계 {stage} (시도 {attempt})")
                 try:
+                    session_state['form_ready'] = False
+                    session_state['navigations'] = (
+                        int(session_state.get('navigations', 0)) + 1
+                    )
                     await page.goto(
                         TARGET_URL,
                         wait_until='domcontentloaded',
@@ -604,6 +731,7 @@ async def search_one(
                     raise
                 else:
                     connection_circuit['consecutive_failures'] = 0
+                    session_state['form_ready'] = True
                 page_ready = True
                 connection_failures = 0
 
@@ -645,7 +773,9 @@ async def search_one(
                     await page.wait_for_timeout(800)
 
             captcha_answer, captcha_image, captcha_source = await get_captcha_answer(
-                page, ocr_executor
+                page,
+                ocr_executor,
+                fast_path=FAST_CAPTCHA_PATH and attempt == 1,
             )
             if captcha_answer:
                 print(f"  캡차 예측: {captcha_answer} (시도 {attempt})")
@@ -676,6 +806,7 @@ async def search_one(
                     continue
                 print("  결과 화면 로딩 실패 — 검색 응답을 확인할 수 없음")
                 await save_result_debug(page, case_no)
+                session_state['form_ready'] = False
                 return {h: '' for h in OUTPUT_HEADERS} | {
                     '법원': court, '사건번호': case_no,
                     '사건명': '조회실패: 결과 화면 미확인',
@@ -689,10 +820,10 @@ async def search_one(
             content = await page.content()
             if any(k in content for k in ['사건이 존재하지 않습니다', '조회된 사건이 없습니다', '검색결과가 없습니다']):
                 print(f"  ℹ 사건 없음")
-                return {h: '' for h in OUTPUT_HEADERS} | {
+                return await finish({h: '' for h in OUTPUT_HEADERS} | {
                     '법원': court, '사건번호': case_no,
                     '사건명': '사건없음', '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-                }
+                }, result_page=True)
 
             # 성공 → 결과 파싱
             stage = '결과 파싱'
@@ -703,13 +834,14 @@ async def search_one(
                 print("  결과 화면은 열렸지만 사건명 추출에 실패")
             else:
                 print(f"  ✅ 결과 파싱 완료: 사건명={result['사건명']}")
-            return result
+            return await finish(result, result_page=True)
 
         except ValueError as e:
             print(f"  입력 오류: {e}")
             break
         except PlaywrightTimeout as e:
             page_ready = False
+            session_state['form_ready'] = False
             detail = str(e).replace('\n', ' ')[:180]
             # goto뿐 아니라 초기 WebSquare 셀렉터 대기도 사이트 접속 단계다.
             # HTML 일부만 내려오고 초기화가 끝나지 않는 경우도 같은 접속
@@ -737,6 +869,8 @@ async def search_one(
             continue
         except Exception as e:
             page_ready = False if any(token in str(e) for token in ('ERR_CONNECTION', 'net::', 'Target closed')) else page_ready
+            if not page_ready:
+                session_state['form_ready'] = False
             detail = str(e).replace('\n', ' ')[:220]
             if any(token in detail for token in ('ERR_CONNECTION', 'net::', 'Connection timed out')):
                 failure_reason = '법원 사이트 연결 실패'
@@ -754,6 +888,7 @@ async def search_one(
                 print(f"  ❌ {stage} 단계 오류 (시도 {attempt}): {detail}")
             continue
 
+    session_state['form_ready'] = False
     return {h: '' for h in OUTPUT_HEADERS} | {
         '법원': court, '사건번호': case_no,
         '사건명': f'조회실패: {failure_reason}',
@@ -892,6 +1027,7 @@ class PartialResultPublisher:
 # 메인
 # ──────────────────────────────────────────────
 async def main():
+    run_started_at = asyncio.get_running_loop().time()
     cli_args = [arg for arg in sys.argv[1:] if arg != '--prepare-only']
     prepare_only = '--prepare-only' in sys.argv[1:]
     input_path = cli_args[0] if cli_args else INPUT_FILE
@@ -931,7 +1067,17 @@ async def main():
     if prepare_only:
         worker_count = 1
         max_worker_count = 1
-    if max_worker_count > worker_count:
+    rescue_enabled = (
+        IMMEDIATE_RETRY_WORKER
+        and not prepare_only
+        and max_worker_count > worker_count
+    )
+    if rescue_enabled:
+        print(
+            f"조회 워커 {worker_count}개와 실패 사건 전용 구조대 워커 1개로 "
+            "실행합니다."
+        )
+    elif max_worker_count > worker_count:
         print(
             f"조회 워커 {worker_count}개로 시작하며 접속 상태가 안정적이면 "
             f"최대 {max_worker_count}개로 확대합니다."
@@ -948,7 +1094,7 @@ async def main():
         'diagnosed': False,
     }
     adaptive_state = {
-        'enabled': max_worker_count > worker_count,
+        'enabled': max_worker_count > worker_count and not rescue_enabled,
         'samples': [],
         'scale_event': asyncio.Event(),
         'extra_worker_retired': False,
@@ -958,6 +1104,13 @@ async def main():
     ocr_executor = ThreadPoolExecutor(
         max_workers=1, thread_name_prefix='captcha-ocr'
     )
+    if FAST_CAPTCHA_PATH and not prepare_only:
+        print('⚡ 캡차 고속 경로 준비: 고정 문자영역 인식기를 미리 적재합니다.')
+        await asyncio.get_running_loop().run_in_executor(
+            ocr_executor, warmup_captcha_solver
+        )
+    if REUSE_SEARCH_SESSION and not prepare_only:
+        print('♻ 검색 세션 재사용 실험 활성화')
     async with async_playwright() as p:
         launch_options = {
             'headless': HEADLESS,
@@ -988,6 +1141,44 @@ async def main():
             return context, page
 
         pages = [await make_page(worker_id) for worker_id in range(max_worker_count)]
+        session_states = [{} for _ in range(max_worker_count)]
+        immediate_retry_queue = asyncio.Queue()
+        retry_scheduled: set[int] = set()
+        retried_indices: set[int] = set()
+
+        async def rescue_worker(worker_id: int, page: Page):
+            """일반 조회와 겹쳐 실패 사건을 새 브라우저 세션에서 재조회한다."""
+            while True:
+                idx = await immediate_retry_queue.get()
+                try:
+                    if connection_circuit['event'].is_set():
+                        retried_indices.add(idx)
+                        continue
+                    case = cases[idx]
+                    print(
+                        f"[구조대 {idx + 1}/{len(cases)} 워커 {worker_id + 1}]",
+                        end=' ',
+                    )
+                    try:
+                        results[idx] = await search_one(
+                            page,
+                            case['court'],
+                            case['case_no'],
+                            case['party_name'],
+                            prepare_only,
+                            ocr_executor,
+                            connection_circuit,
+                            session_states[worker_id],
+                        )
+                    except Exception as error:
+                        print(
+                            '  ❌ 구조대 재조회 오류: '
+                            + str(error).replace('\n', ' ')[:220]
+                        )
+                    finally:
+                        retried_indices.add(idx)
+                finally:
+                    immediate_retry_queue.task_done()
 
         async def run_batch(indices, retry=False):
             """인덱스 목록을 워커에 나눠 실행하고 결과 순서는 원본을 유지한다."""
@@ -1023,12 +1214,25 @@ async def main():
                             prepare_only,
                             ocr_executor,
                             connection_circuit,
+                            session_states[worker_id],
                         )
                         record_adaptive_health(
                             adaptive_state,
                             results[idx],
                             asyncio.get_running_loop().time() - started_at,
                         )
+                        if (
+                            rescue_enabled
+                            and not retry
+                            and idx not in retry_scheduled
+                            and str(results[idx].get('사건명', '')).startswith('조회실패')
+                        ):
+                            retry_scheduled.add(idx)
+                            immediate_retry_queue.put_nowait(idx)
+                            print(
+                                f"  🚑 실패 사건 즉시 구조대 대기열 등록: "
+                                f"{idx + 1}/{len(cases)}"
+                            )
                         if not retry:
                             await partial_publisher.publish_ready()
                     finally:
@@ -1058,7 +1262,7 @@ async def main():
                     return
                 await worker(worker_id, page)
 
-            extra_tasks = [
+            extra_tasks = [] if rescue_enabled else [
                 asyncio.create_task(adaptive_worker(worker_id, pages[worker_id][1]))
                 for worker_id in range(worker_count, max_worker_count)
             ]
@@ -1066,7 +1270,33 @@ async def main():
             batch_finished.set()
             await asyncio.gather(*extra_tasks)
 
+        rescue_tasks = []
+        if rescue_enabled:
+            rescue_tasks.append(asyncio.create_task(
+                rescue_worker(worker_count, pages[worker_count][1])
+            ))
+
         await run_batch(range(len(cases)))
+
+        if rescue_enabled:
+            # 1차 큐가 끝난 뒤 유휴 상태가 된 세 워커도 남은 구조대 큐를
+            # 함께 비워 마지막 재조회 꼬리가 전체 완료를 늦추지 않게 한다.
+            rescue_tasks.extend(
+                asyncio.create_task(rescue_worker(worker_id, pages[worker_id][1]))
+                for worker_id in range(worker_count)
+            )
+            await immediate_retry_queue.join()
+            for task in rescue_tasks:
+                task.cancel()
+            await asyncio.gather(*rescue_tasks, return_exceptions=True)
+            if retried_indices:
+                await partial_publisher.publish_revisions(
+                    sorted(retried_indices)
+                )
+            print(
+                f"🚑 구조대 재조회 완료: {len(retried_indices)}건 "
+                f"(1차 조회와 병행)"
+            )
 
         # 전역 접속 차단기가 열린 뒤 큐에서 시작하지 못한 사건도 결과 파일에
         # 반드시 남긴다. 이미 성공한 사건과 개별 실패 결과는 그대로 보존한다.
@@ -1095,12 +1325,36 @@ async def main():
             failed = [
                 idx for idx, data in enumerate(results)
                 if str(data.get('사건명', '')).startswith('조회실패')
+                and idx not in retried_indices
             ]
             if failed:
                 print(f"\n실패 사건 재조회 시작: {len(failed)}건 (각 사건 1회)")
                 await run_batch(failed, retry=True)
                 await partial_publisher.publish_revisions(failed)
 
+        session_metrics = {
+            'cases': len(cases),
+            'navigations': sum(
+                int(state.get('navigations', 0)) for state in session_states
+            ),
+            'reuse_hits': sum(
+                int(state.get('reuse_hits', 0)) for state in session_states
+            ),
+            'reuse_prepared': sum(
+                int(state.get('reuse_prepared', 0)) for state in session_states
+            ),
+            'reuse_fallbacks': sum(
+                int(state.get('reuse_fallbacks', 0)) for state in session_states
+            ),
+            'immediate_retries': len(retried_indices),
+            'elapsed_seconds_before_output': round(
+                asyncio.get_running_loop().time() - run_started_at, 2
+            ),
+        }
+        print(
+            '성능 계측: '
+            + json.dumps(session_metrics, ensure_ascii=False, sort_keys=True)
+        )
         await browser.close()
     ocr_executor.shutdown(wait=True)
 

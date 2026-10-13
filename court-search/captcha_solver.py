@@ -23,6 +23,14 @@ _learned_templates = {str(digit): [] for digit in range(10)}
 _accepted_captcha_count = 0
 MIN_ACCEPTED_FOR_TEMPLATE = int(os.environ.get('CAPTCHA_LEARN_MIN', '20'))
 MAX_TEMPLATES_PER_DIGIT = 200
+FAST_PATH_ENABLED = os.environ.get('CAPTCHA_FAST_PATH', '').lower() in {
+    '1', 'true', 'yes', 'on'
+}
+FAST_PATH_VARIANTS = max(2, int(os.environ.get('CAPTCHA_FAST_VARIANTS', '4')))
+FAST_PATH_MIN_VOTES = max(2, int(os.environ.get('CAPTCHA_FAST_MIN_VOTES', '3')))
+FAST_PATH_MIN_CONFIDENCE = float(
+    os.environ.get('CAPTCHA_FAST_MIN_CONFIDENCE', '0.55')
+)
 
 
 def _configure_runtime():
@@ -55,6 +63,11 @@ def _get_reader():
             }
         _reader = easyocr.Reader(['en'], gpu=False, verbose=False, **options)
     return _reader
+
+
+def warmup_captcha_solver():
+    """첫 사건 전에 OCR 모델을 적재해 동시 워커의 초기 대기를 없앤다."""
+    _get_reader()
 
 
 def preprocess_variants(img: Image.Image) -> list[Image.Image]:
@@ -167,7 +180,53 @@ def _predict_learned(img_bytes: bytes) -> tuple[str | None, float]:
     return ''.join(answer), min(margins)
 
 
-def predict_captcha(img_bytes: bytes) -> str:
+def _result_digits(results) -> tuple[str | None, float]:
+    """EasyOCR 결과에서 6자리 답과 가장 높은 신뢰도를 꺼낸다."""
+    candidates = []
+    for item in results or []:
+        if len(item) < 3:
+            continue
+        digits = re.sub(r'\D', '', str(item[1]))
+        if len(digits) >= 6:
+            candidates.append((digits[:6], float(item[2])))
+    if not candidates:
+        return None, 0.0
+    return max(candidates, key=lambda candidate: candidate[1])
+
+
+def _predict_fast(reader, variants: list[Image.Image]) -> str | None:
+    """고정 크기 한 줄 캡차는 문자영역 탐지를 생략하고 바로 판독한다."""
+    votes: dict[str, tuple[int, float]] = {}
+    checked = 0
+    for variant in variants[:FAST_PATH_VARIANTS]:
+        checked += 1
+        # 캡차 전체가 이미 하나의 고정된 문자영역이다. readtext가 매번
+        # 수행하는 CRAFT 문자영역 탐지를 생략하면 CPU 비용이 크게 줄어든다.
+        results = reader.recognize(
+            np.asarray(variant),
+            allowlist='0123456789',
+            detail=1,
+            paragraph=False,
+            decoder='greedy',
+            batch_size=1,
+            workers=0,
+        )
+        digits, confidence = _result_digits(results)
+        if not digits:
+            continue
+        count, best = votes.get(digits, (0, 0.0))
+        votes[digits] = (count + 1, max(best, confidence))
+        count, best = votes[digits]
+        if count >= FAST_PATH_MIN_VOTES and best >= FAST_PATH_MIN_CONFIDENCE:
+            print(
+                f"  ⚡ 캡차 고속 인식: {digits} "
+                f"({count}/{checked}, 신뢰도 {best:.2f})"
+            )
+            return digits
+    return None
+
+
+def predict_captcha(img_bytes: bytes, fast_path: bool | None = None) -> str:
     """
     캡차 이미지 바이트 → 숫자 6자리 문자열 반환
     인식 실패 시 None 반환
@@ -175,8 +234,16 @@ def predict_captcha(img_bytes: bytes) -> str:
     try:
         reader = _get_reader()
         original = Image.open(io.BytesIO(img_bytes))
+        variants = preprocess_variants(original)
+        use_fast_path = FAST_PATH_ENABLED if fast_path is None else fast_path
+        if use_fast_path:
+            fast_answer = _predict_fast(reader, variants)
+            if fast_answer:
+                return fast_answer
+            print('  캡차 고속 인식 불확실 — 정밀 인식으로 전환')
+
         candidates = []
-        for variant in preprocess_variants(original):
+        for variant in variants:
             buf = io.BytesIO()
             variant.save(buf, format='PNG')
             results = reader.readtext(
