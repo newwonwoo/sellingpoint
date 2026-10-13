@@ -44,5 +44,38 @@ class AdaptiveWorkerTests(unittest.TestCase):
         for _ in range(15):
             SEARCH.record_adaptive_health(state, {'사건명': '부동산인도명령'}, 12.0)
         self.assertTrue(state['scale_event'].is_set())
+
+
+class ConnectionCircuitTests(unittest.IsolatedAsyncioTestCase):
+    def circuit(self):
+        return {
+            'failed_sessions': set(),
+            'required_failed_sessions': 3,
+            'event': asyncio.Event(),
+            # 단위 테스트에서는 외부 DNS/HTTP 진단을 실행하지 않는다.
+            'diagnosed': True,
+        }
+
+    async def test_retries_from_one_session_do_not_stop_batch(self):
+        circuit = self.circuit()
+        page = object()
+        for _ in range(4):
+            await SEARCH.mark_session_connection_failure(
+                page, circuit, {'worker_id': 1}
+            )
+        self.assertEqual(circuit['failed_sessions'], {1})
+        self.assertFalse(circuit['event'].is_set())
+
+    async def test_three_distinct_failed_sessions_stop_batch(self):
+        circuit = self.circuit()
+        page = object()
+        for worker_id in (1, 2, 3):
+            await SEARCH.mark_session_connection_failure(
+                page, circuit, {'worker_id': worker_id}
+            )
+        self.assertEqual(circuit['failed_sessions'], {1, 2, 3})
+        self.assertTrue(circuit['event'].is_set())
+
+
 if __name__ == '__main__':
     unittest.main()

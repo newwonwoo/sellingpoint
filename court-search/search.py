@@ -44,8 +44,8 @@ MAX_CAPTCHA_RETRY = 5
 # 내려가 있거나 러너에서 연결이 막힌 상태로 20회까지 기다리면 한 건도
 # 오래 멈추므로, 짧게 재시도한 뒤 해당 사건을 실패 처리한다.
 MAX_CONNECTION_RETRY = 3
-# 서로 다른 워커에서도 첫 화면 초기화가 연속으로 실패하면 사이트 전체
-# 접속 장애로 본다. 남은 수백 건을 같은 방식으로 소진하지 않기 위한 값이다.
+# 서로 다른 브라우저 세션이 모두 첫 화면 초기화에 실패할 때만 사이트 전체
+# 접속 장애로 본다. 한 세션의 연속 오류만으로 전체 배치를 중단하면 안 된다.
 MAX_GLOBAL_CONNECTION_FAILURES = 3
 HEADLESS = True
 
@@ -281,13 +281,30 @@ async def search_form_ready(page: Page) -> bool:
         return False
 
 
-async def return_to_search_form(page: Page, timeout_ms: int = 6000) -> bool:
-    """결과 화면에서 전체 앱을 다시 열지 않고 검색 폼으로 돌아간다."""
-    if await search_form_ready(page):
-        return True
-
-    clicked = False
+async def click_search_form_button(page: Page) -> bool:
+    """WebSquare 구현 방식과 무관하게 결과 화면의 검색화면 버튼을 누른다."""
     for frame in page.frames:
+        locators = (
+            frame.get_by_role('button', name=re.compile(r'^\s*검색화면\s*$')),
+            frame.locator('input[value="검색화면"]'),
+            frame.locator('[title="검색화면"], [aria-label="검색화면"]'),
+            frame.get_by_text('검색화면', exact=True),
+        )
+        for locator in locators:
+            try:
+                count = min(await locator.count(), 5)
+                for index in range(count):
+                    candidate = locator.nth(index)
+                    if not await candidate.is_visible():
+                        continue
+                    await candidate.click(timeout=2000, force=True)
+                    return True
+            except Exception:
+                continue
+
+        # 일부 WebSquare 트리거는 span/div에만 글자가 있고 실제 클릭 핸들러는
+        # 상위 요소에 붙는다. 텍스트 노드에서 가장 가까운 클릭 가능한 조상을
+        # 찾아 마지막으로 시도한다.
         try:
             clicked = await frame.evaluate("""
                 () => {
@@ -295,23 +312,33 @@ async def return_to_search_form(page: Page, timeout_ms: int = 6000) -> bool:
                     element.offsetWidth || element.offsetHeight ||
                     element.getClientRects().length
                   );
-                  const candidates = [...document.querySelectorAll(
-                    'button, a, input, [role="button"]'
-                  )];
-                  const target = candidates.find(element => {
-                    const text = (element.textContent || '').replace(/\\s+/g, ' ').trim();
-                    const value = (element.value || '').replace(/\\s+/g, ' ').trim();
-                    return visible(element) && (text === '검색화면' || value === '검색화면');
+                  const nodes = [...document.querySelectorAll('body *')];
+                  const label = nodes.find(element => {
+                    const text = (element.textContent || '')
+                      .replace(/\\s+/g, ' ').trim();
+                    return visible(element) && text === '검색화면';
                   });
-                  if (!target) return false;
+                  if (!label) return false;
+                  const target = label.closest(
+                    'button, a, input, [role="button"], [onclick], .w2trigger'
+                  ) || label;
                   target.click();
                   return true;
                 }
             """)
             if clicked:
-                break
+                return True
         except Exception:
             continue
+    return False
+
+
+async def return_to_search_form(page: Page, timeout_ms: int = 6000) -> bool:
+    """결과 화면에서 전체 앱을 다시 열지 않고 검색 폼으로 돌아간다."""
+    if await search_form_ready(page):
+        return True
+
+    clicked = await click_search_form_button(page)
     if not clicked:
         return False
 
@@ -328,6 +355,17 @@ async def return_to_search_form(page: Page, timeout_ms: int = 6000) -> bool:
         return True
     except Exception:
         return False
+
+
+async def settle_failed_navigation(page: Page, attempt: int):
+    """Chrome 오류 페이지의 후속 이동이 다음 goto를 가로채지 않게 정리한다."""
+    try:
+        await page.wait_for_timeout(min(750 * attempt, 2000))
+        await page.goto('about:blank', wait_until='commit', timeout=5000)
+        await page.wait_for_timeout(250)
+    except Exception:
+        # 다음 TARGET_URL 이동 자체가 최종 복구 수단이므로 정리 실패는 무시한다.
+        pass
 
 
 # ──────────────────────────────────────────────
@@ -632,6 +670,31 @@ async def diagnose_site_connection(page: Page):
         print(f"  진단 직접 HTTP 실패: {type(e).__name__}: {detail}")
 
 
+async def mark_session_connection_failure(
+    page: Page,
+    connection_circuit: dict,
+    session_state: dict,
+):
+    """한 세션이 재시도를 소진했음을 기록하고 여러 세션 실패 때만 차단한다."""
+    session_key = session_state.get('worker_id', id(page))
+    failed_sessions = connection_circuit.setdefault('failed_sessions', set())
+    failed_sessions.add(session_key)
+    required = int(connection_circuit.get(
+        'required_failed_sessions', MAX_GLOBAL_CONNECTION_FAILURES
+    ))
+    if len(failed_sessions) < required or connection_circuit['event'].is_set():
+        return
+
+    connection_circuit['event'].set()
+    print(
+        f"  ⛔ 서로 다른 검색 세션 {len(failed_sessions)}개가 모두 "
+        "첫 화면 초기화에 실패했습니다. 남은 사건 조회를 중단합니다."
+    )
+    if not connection_circuit['diagnosed']:
+        connection_circuit['diagnosed'] = True
+        await diagnose_site_connection(page)
+
+
 # ──────────────────────────────────────────────
 # 단건 조회 (신규 사이트)
 # ──────────────────────────────────────────────
@@ -679,7 +742,8 @@ async def search_one(
 
     if connection_circuit is None:
         connection_circuit = {
-            'consecutive_failures': 0,
+            'failed_sessions': set(),
+            'required_failed_sessions': MAX_GLOBAL_CONNECTION_FAILURES,
             'event': asyncio.Event(),
             'diagnosed': False,
         }
@@ -714,23 +778,11 @@ async def search_one(
                     # WebSquare 초기화 대기
                     await page.wait_for_selector(SEL_COURT, timeout=15000)
                 except Exception:
-                    connection_circuit['consecutive_failures'] += 1
-                    global_failures = connection_circuit['consecutive_failures']
-                    if (
-                        global_failures >= MAX_GLOBAL_CONNECTION_FAILURES
-                        and not circuit_event.is_set()
-                    ):
-                        circuit_event.set()
-                        print(
-                            f"  ⛔ 첫 화면 초기화가 {global_failures}회 연속 실패했습니다. "
-                            "남은 사건 조회를 중단합니다."
-                        )
-                        if not connection_circuit['diagnosed']:
-                            connection_circuit['diagnosed'] = True
-                            await diagnose_site_connection(page)
                     raise
                 else:
-                    connection_circuit['consecutive_failures'] = 0
+                    # 어느 세션이든 정상 접속했다면 현재 사이트 전체 장애가
+                    # 아님이 확인된 것이므로 이전 세션 실패 표식을 지운다.
+                    connection_circuit.setdefault('failed_sessions', set()).clear()
                     session_state['form_ready'] = True
                 page_ready = True
                 connection_failures = 0
@@ -862,17 +914,19 @@ async def search_one(
             if connection_failures >= MAX_CONNECTION_RETRY:
                 print(f"  ⏹ 사이트 접속 {MAX_CONNECTION_RETRY}회 실패 — 이 사건을 중단하고 다음 사건으로 이동합니다.")
                 break
-            try:
-                await page.wait_for_timeout(min(3000 * attempt, 15000))
-            except Exception:
-                pass
+            await settle_failed_navigation(page, attempt)
             continue
         except Exception as e:
             page_ready = False if any(token in str(e) for token in ('ERR_CONNECTION', 'net::', 'Target closed')) else page_ready
             if not page_ready:
                 session_state['form_ready'] = False
             detail = str(e).replace('\n', ' ')[:220]
-            if any(token in detail for token in ('ERR_CONNECTION', 'net::', 'Connection timed out')):
+            if stage == '사이트 접속' or any(
+                token in detail
+                for token in ('ERR_CONNECTION', 'net::', 'Connection timed out')
+            ):
+                page_ready = False
+                session_state['form_ready'] = False
                 failure_reason = '법원 사이트 연결 실패'
                 connection_failures += 1
                 print(f"  ❌ 법원 사이트 연결 실패 (단계: {stage}, 시도 {attempt}): {detail}")
@@ -886,9 +940,18 @@ async def search_one(
             else:
                 failure_reason = f'{stage} 단계 오류'
                 print(f"  ❌ {stage} 단계 오류 (시도 {attempt}): {detail}")
+            if not page_ready:
+                await settle_failed_navigation(page, attempt)
             continue
 
     session_state['form_ready'] = False
+    if (
+        connection_failures >= MAX_CONNECTION_RETRY
+        and failure_reason == '법원 사이트 연결 실패'
+    ):
+        await mark_session_connection_failure(
+            page, connection_circuit, session_state
+        )
     return {h: '' for h in OUTPUT_HEADERS} | {
         '법원': court, '사건번호': case_no,
         '사건명': f'조회실패: {failure_reason}',
@@ -1089,7 +1152,10 @@ async def main():
     partial_publisher = PartialResultPublisher(results)
     await partial_publisher.start()
     connection_circuit = {
-        'consecutive_failures': 0,
+        'failed_sessions': set(),
+        'required_failed_sessions': min(
+            MAX_GLOBAL_CONNECTION_FAILURES, worker_count
+        ),
         'event': asyncio.Event(),
         'diagnosed': False,
     }
@@ -1141,7 +1207,10 @@ async def main():
             return context, page
 
         pages = [await make_page(worker_id) for worker_id in range(max_worker_count)]
-        session_states = [{} for _ in range(max_worker_count)]
+        session_states = [
+            {'worker_id': worker_id + 1}
+            for worker_id in range(max_worker_count)
+        ]
         immediate_retry_queue = asyncio.Queue()
         retry_scheduled: set[int] = set()
         retried_indices: set[int] = set()
@@ -1314,8 +1383,9 @@ async def main():
                 }
             await partial_publisher.publish_ready()
             print(
-                f"\n⛔ 사이트 첫 화면이 {MAX_GLOBAL_CONNECTION_FAILURES}회 연속 "
-                f"열리지 않아 남은 {deferred}건을 조회보류로 저장합니다."
+                f"\n⛔ 서로 다른 검색 세션 "
+                f"{connection_circuit['required_failed_sessions']}개가 첫 화면을 "
+                f"열지 못해 남은 {deferred}건을 조회보류로 저장합니다."
             )
 
         # 1차 조회에서 접속 장애·캡차 오류 등으로 실패한 사건만 마지막에
