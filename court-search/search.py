@@ -575,8 +575,33 @@ async def refresh_captcha_info(page: Page) -> dict | None:
     reload_button = page.locator(SEL_CAPTCHA_RELOAD)
     if await reload_button.count() == 0:
         return None
+    captcha_image = page.locator(SEL_CAPTCHA_IMG)
+    previous_src = ''
+    try:
+        previous_src = await captcha_image.get_attribute('src') or ''
+    except Exception:
+        pass
     await reload_button.click()
-    return await wait_for_captcha_info(page, previous)
+    info = await wait_for_captcha_info(page, previous)
+    if not info:
+        return None
+    # response 이벤트는 WebSquare submitdone이 blob URL을 img에 반영하기
+    # 직전에 도착한다. 토큰은 새것인데 화면은 이전 그림인 짧은 구간을
+    # 건너뛰어야 캡차 이미지와 암호화 answer가 같은 세대가 된다.
+    try:
+        await page.wait_for_function(
+            """({selector, previousSrc}) => {
+              const image = document.querySelector(selector);
+              const src = image?.getAttribute('src') || '';
+              return !!src && src !== previousSrc;
+            }""",
+            {'selector': SEL_CAPTCHA_IMG, 'previousSrc': previous_src},
+            timeout=5000,
+        )
+        await page.wait_for_timeout(200)
+    except Exception:
+        print('  ⚠ 새 캡차 이미지 반영 대기 시간 초과')
+    return info
 
 
 async def post_court_json(page: Page, endpoint: str, search_data: dict) -> dict:
@@ -689,7 +714,10 @@ async def direct_api_result(
     payload = basic_response.get('payload') or {}
     message = str(payload.get('message') or basic_response.get('preview') or '')
     if http_status == 550 or '캡챠' in message or '방지문자' in message:
-        print('  캡차 불일치 → JSON 직접조회 재시도')
+        print(
+            f'  캡차 불일치 → JSON 직접조회 재시도 '
+            f'(HTTP {http_status}, {message[:100]})'
+        )
         return 'captcha_mismatch', None
     if http_status != 200 or int(payload.get('status') or 0) != 200:
         print(
