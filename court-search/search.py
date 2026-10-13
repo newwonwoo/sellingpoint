@@ -575,32 +575,13 @@ async def refresh_captcha_info(page: Page) -> dict | None:
     reload_button = page.locator(SEL_CAPTCHA_RELOAD)
     if await reload_button.count() == 0:
         return None
-    captcha_image = page.locator(SEL_CAPTCHA_IMG)
-    previous_src = ''
-    try:
-        previous_src = await captcha_image.get_attribute('src') or ''
-    except Exception:
-        pass
     await reload_button.click()
     info = await wait_for_captcha_info(page, previous)
     if not info:
         return None
     # response 이벤트는 WebSquare submitdone이 blob URL을 img에 반영하기
-    # 직전에 도착한다. 토큰은 새것인데 화면은 이전 그림인 짧은 구간을
-    # 건너뛰어야 캡차 이미지와 암호화 answer가 같은 세대가 된다.
-    try:
-        await page.wait_for_function(
-            """({selector, previousSrc}) => {
-              const image = document.querySelector(selector);
-              const src = image?.getAttribute('src') || '';
-              return !!src && src !== previousSrc;
-            }""",
-            {'selector': SEL_CAPTCHA_IMG, 'previousSrc': previous_src},
-            timeout=5000,
-        )
-        await page.wait_for_timeout(200)
-    except Exception:
-        print('  ⚠ 새 캡차 이미지 반영 대기 시간 초과')
+    # 직전에 도착한다. 기존 화면 방식에서 검증된 800ms 안정화 시간을 둔다.
+    await page.wait_for_timeout(800)
     return info
 
 
@@ -704,6 +685,10 @@ async def direct_api_result(
         'etc2': '',
         'etc3': '',
     }
+    print(
+        f'  🔎 JSON 요청 코드: court={court_code}, year={year}, '
+        f'type={case_type_code}, serial={serial}, task={task_code}'
+    )
     base_url = f'/ssgo/ssgo{api_path}'
     basic_response = await post_court_json(
         page,
@@ -713,16 +698,19 @@ async def direct_api_result(
     http_status = int(basic_response.get('http_status') or 0)
     payload = basic_response.get('payload') or {}
     message = str(payload.get('message') or basic_response.get('preview') or '')
-    if http_status == 550 or '캡챠' in message or '방지문자' in message:
+    errors = payload.get('errors') or {}
+    error_message = str(errors.get('errorMessage') or '')
+    combined_message = f'{message} {error_message}'
+    if '캡챠' in combined_message or '방지문자' in combined_message:
         print(
             f'  캡차 불일치 → JSON 직접조회 재시도 '
-            f'(HTTP {http_status}, {message[:100]})'
+            f'(HTTP {http_status}, {combined_message[:100]})'
         )
         return 'captcha_mismatch', None
     if http_status != 200 or int(payload.get('status') or 0) != 200:
         print(
             f"  ⚠ JSON 기본내용 조회 실패: HTTP {http_status}, "
-            f"{message[:180]} — 기존 화면 조회로 전환"
+            f"{combined_message[:180]} — 기존 화면 조회로 전환"
         )
         return 'protocol_error', None
     basic = (payload.get('data') or {}).get('dma_csBasCtt') or {}
