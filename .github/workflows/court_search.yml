@@ -169,7 +169,8 @@ jobs:
           COURT_MAX_WORKERS: '4'
           OCR_TORCH_THREADS: '2'
           COURT_REUSE_SESSION: ${{ inputs.speed_experiment }}
-          CAPTCHA_FAST_PATH: ${{ inputs.speed_experiment }}
+          # 20건 A/B에서 캡차 불일치가 15→45회로 늘어 실험 대상에서 제외.
+          CAPTCHA_FAST_PATH: 'false'
           COURT_IMMEDIATE_RETRY: ${{ inputs.speed_experiment }}
           CAPTCHA_DATA_DIR: court-search/captcha-success
           CAPTCHA_SEED_DIR: court-search/captcha-model
@@ -388,7 +389,7 @@ jobs:
           COURT_MAX_WORKERS: '4'
           OCR_TORCH_THREADS: '2'
           COURT_REUSE_SESSION: ${{ inputs.speed_experiment }}
-          CAPTCHA_FAST_PATH: ${{ inputs.speed_experiment }}
+          CAPTCHA_FAST_PATH: 'false'
           COURT_IMMEDIATE_RETRY: ${{ inputs.speed_experiment }}
           CAPTCHA_DATA_DIR: court-search/captcha-success
           CAPTCHA_SEED_DIR: court-search/captcha-model

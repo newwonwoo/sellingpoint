@@ -297,6 +297,19 @@ async def click_search_form_button(page: Page) -> bool:
                     candidate = locator.nth(index)
                     if not await candidate.is_visible():
                         continue
+                    descriptor = await candidate.evaluate("""
+                        element => ({
+                          tag: element.tagName,
+                          id: element.id || '',
+                          className: String(element.className || '').slice(0, 120),
+                          text: (element.textContent || '').replace(/\\s+/g, ' ').trim(),
+                          value: element.value || '',
+                        })
+                    """)
+                    print(
+                        '  ♻ 검색화면 버튼 클릭 시도: '
+                        + json.dumps(descriptor, ensure_ascii=False)
+                    )
                     await candidate.click(timeout=2000, force=True)
                     return True
             except Exception:
@@ -318,15 +331,25 @@ async def click_search_form_button(page: Page) -> bool:
                       .replace(/\\s+/g, ' ').trim();
                     return visible(element) && text === '검색화면';
                   });
-                  if (!label) return false;
+                  if (!label) return null;
                   const target = label.closest(
                     'button, a, input, [role="button"], [onclick], .w2trigger'
                   ) || label;
                   target.click();
-                  return true;
+                  return {
+                    tag: target.tagName,
+                    id: target.id || '',
+                    className: String(target.className || '').slice(0, 120),
+                    text: (target.textContent || '').replace(/\\s+/g, ' ').trim(),
+                    value: target.value || '',
+                  };
                 }
             """)
             if clicked:
+                print(
+                    '  ♻ 검색화면 버튼 클릭 시도(JS): '
+                    + json.dumps(clicked, ensure_ascii=False)
+                )
                 return True
         except Exception:
             continue
@@ -354,6 +377,22 @@ async def return_to_search_form(page: Page, timeout_ms: int = 6000) -> bool:
         )
         return True
     except Exception:
+        try:
+            court = page.locator(SEL_COURT)
+            state = {
+                'url': page.url,
+                'court_count': await court.count(),
+                'court_visible': (
+                    await court.first.is_visible() if await court.count() else False
+                ),
+                'context_pages': len(page.context.pages),
+            }
+            print(
+                '  ♻ 검색화면 복귀 진단: '
+                + json.dumps(state, ensure_ascii=False)
+            )
+        except Exception:
+            pass
         return False
 
 
