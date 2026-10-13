@@ -172,6 +172,7 @@ jobs:
           # 20건 A/B에서 캡차 불일치가 15→45회로 늘어 실험 대상에서 제외.
           CAPTCHA_FAST_PATH: 'false'
           COURT_IMMEDIATE_RETRY: ${{ inputs.speed_experiment }}
+          COURT_TRACE_NETWORK: ${{ inputs.speed_experiment }}
           CAPTCHA_DATA_DIR: court-search/captcha-success
           CAPTCHA_SEED_DIR: court-search/captcha-model
           DEBUG_DIR: court-search/debug
@@ -228,6 +229,15 @@ jobs:
           path: court-search/output.xlsx
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: 실험 화면 진단자료 보관
+        if: ${{ always() && inputs.speed_experiment == true }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: court-search-debug
+          path: court-search/debug
+          if-no-files-found: ignore
+          retention-days: 3
 
       - name: 통과 캡차 학습 후보 확정
         if: ${{ steps.inspect.outputs.global_connection_failure != 'true' }}
@@ -391,6 +401,7 @@ jobs:
           COURT_REUSE_SESSION: ${{ inputs.speed_experiment }}
           CAPTCHA_FAST_PATH: 'false'
           COURT_IMMEDIATE_RETRY: ${{ inputs.speed_experiment }}
+          COURT_TRACE_NETWORK: ${{ inputs.speed_experiment }}
           CAPTCHA_DATA_DIR: court-search/captcha-success
           CAPTCHA_SEED_DIR: court-search/captcha-model
           DEBUG_DIR: court-search/debug

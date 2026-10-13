@@ -356,7 +356,11 @@ async def click_search_form_button(page: Page) -> bool:
     return False
 
 
-async def return_to_search_form(page: Page, timeout_ms: int = 6000) -> bool:
+async def return_to_search_form(
+    page: Page,
+    timeout_ms: int = 6000,
+    debug_label: str = '',
+) -> bool:
     """결과 화면에서 전체 앱을 다시 열지 않고 검색 폼으로 돌아간다."""
     if await search_form_ready(page):
         return True
@@ -391,6 +395,8 @@ async def return_to_search_form(page: Page, timeout_ms: int = 6000) -> bool:
                 '  ♻ 검색화면 복귀 진단: '
                 + json.dumps(state, ensure_ascii=False)
             )
+            if debug_label:
+                await save_result_debug(page, f'{debug_label}_return')
         except Exception:
             pass
         return False
@@ -763,7 +769,7 @@ async def search_one(
         if not reuse_enabled:
             return data
         if result_page:
-            ready = await return_to_search_form(page)
+            ready = await return_to_search_form(page, debug_label=case_no)
             session_state['form_ready'] = ready
             if ready:
                 session_state['reuse_prepared'] = (
@@ -1243,6 +1249,40 @@ async def main():
                 await dialog.dismiss()
 
             page.on('dialog', handle_dialog)
+            if env_enabled('COURT_TRACE_NETWORK'):
+                trace_host = urlparse(TARGET_URL).hostname
+
+                def trace_request(request):
+                    if (
+                        request.resource_type not in {'xhr', 'fetch'}
+                        or urlparse(request.url).hostname != trace_host
+                    ):
+                        return
+                    body = (request.post_data or '').replace('\n', ' ')[:1200]
+                    print(
+                        f"  🔬 NET 요청 워커 {worker_id + 1}: "
+                        f"{request.method} {request.url} body={body}"
+                    )
+
+                async def trace_response(response):
+                    request = response.request
+                    if (
+                        request.resource_type not in {'xhr', 'fetch'}
+                        or urlparse(request.url).hostname != trace_host
+                    ):
+                        return
+                    try:
+                        body = (await response.text()).replace('\n', ' ')[:1200]
+                    except Exception:
+                        body = '<body unavailable>'
+                    print(
+                        f"  🔬 NET 응답 워커 {worker_id + 1}: "
+                        f"{response.status} {request.method} {response.url} "
+                        f"body={body}"
+                    )
+
+                page.on('request', trace_request)
+                page.on('response', trace_response)
             return context, page
 
         pages = [await make_page(worker_id) for worker_id in range(max_worker_count)]
