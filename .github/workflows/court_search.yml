@@ -172,7 +172,8 @@ jobs:
           # 20건 A/B에서 캡차 불일치가 15→45회로 늘어 실험 대상에서 제외.
           CAPTCHA_FAST_PATH: 'false'
           COURT_IMMEDIATE_RETRY: ${{ inputs.speed_experiment }}
-          COURT_TRACE_NETWORK: ${{ inputs.speed_experiment }}
+          COURT_DIRECT_API: ${{ inputs.speed_experiment }}
+          COURT_TRACE_NETWORK: 'false'
           CAPTCHA_DATA_DIR: court-search/captcha-success
           CAPTCHA_SEED_DIR: court-search/captcha-model
           DEBUG_DIR: court-search/debug
@@ -401,7 +402,8 @@ jobs:
           COURT_REUSE_SESSION: ${{ inputs.speed_experiment }}
           CAPTCHA_FAST_PATH: 'false'
           COURT_IMMEDIATE_RETRY: ${{ inputs.speed_experiment }}
-          COURT_TRACE_NETWORK: ${{ inputs.speed_experiment }}
+          COURT_DIRECT_API: ${{ inputs.speed_experiment }}
+          COURT_TRACE_NETWORK: 'false'
           CAPTCHA_DATA_DIR: court-search/captcha-success
           CAPTCHA_SEED_DIR: court-search/captcha-model
           DEBUG_DIR: court-search/debug

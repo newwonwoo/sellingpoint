@@ -57,6 +57,7 @@ def env_enabled(name: str) -> bool:
 REUSE_SEARCH_SESSION = env_enabled('COURT_REUSE_SESSION')
 FAST_CAPTCHA_PATH = env_enabled('CAPTCHA_FAST_PATH')
 IMMEDIATE_RETRY_WORKER = env_enabled('COURT_IMMEDIATE_RETRY')
+DIRECT_API_PATH = env_enabled('COURT_DIRECT_API')
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 INPUT_FILE = os.path.join(BASE_DIR, 'input.xlsx')
@@ -149,6 +150,17 @@ SCALE_MAX_AVERAGE_SECONDS = 25.0
 RETIRE_SAMPLE_SIZE = 10
 RETIRE_MIN_CONNECTION_FAILURES = 2
 RETIRE_MAX_AVERAGE_SECONDS = 35.0
+
+# WebSquare 사건유형별 상세조회 API 경로. 현재 실사용 입력인 타인 사건은
+# GJ(/ssgo10a/)이며, 다른 유형도 사이트의 공개 화면 매핑을 그대로 따른다.
+TASK_API_PATHS = {
+    'CV': '101', 'KS': '102', 'HS': '103', 'PT': '104',
+    'KA': '105', 'ET': '106', 'HP': '107', 'HJ': '108',
+    'JH': '109', 'GJ': '10a', 'DJ': '10b', 'DC': '10c',
+    'GW': '10d', 'GO': '10e', 'JJ': '10f', 'HG': '10g',
+    'SB': '10h', 'GB': '10i', 'HY': '10j', 'EY': '10k',
+    'IB': '10m', 'GS': '10p',
+}
 
 
 # ──────────────────────────────────────────────
@@ -464,6 +476,260 @@ async def select_court(page: Page, court: str):
     return True
 
 
+def format_court_date(value) -> str:
+    """법원 API의 YYYYMMDD 값을 기존 화면과 같은 YYYY.MM.DD로 바꾼다."""
+    text = re.sub(r'[^0-9]', '', str(value or ''))
+    if len(text) == 8:
+        return f'{text[:4]}.{text[4:6]}.{text[6:8]}'
+    return str(value or '')
+
+
+def parse_direct_api_result(
+    basic_payload: dict,
+    progress_payload: dict,
+    court: str,
+    case_no: str,
+) -> dict:
+    """화면 표를 만들기 전의 구조화 JSON을 기존 25개 결과 열로 변환한다."""
+    data = {header: '' for header in OUTPUT_HEADERS}
+    data.update({
+        '법원': court,
+        '사건번호': case_no,
+        '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    })
+    basic_data = (basic_payload or {}).get('data') or {}
+    progress_data = (progress_payload or {}).get('data') or {}
+    basic = basic_data.get('dma_csBasCtt') or {}
+
+    case_name = str(basic.get('csNm') or '').strip()
+    if case_name and str(basic.get('lwstDvsCd') or '') == '2':
+        case_name = '[전자]' + case_name
+    data['사건명'] = case_name
+
+    department = str(basic.get('jdbnNm') or '').strip()
+    if basic.get('csUltmtYmd') and basic.get('ultmtJdbnNm'):
+        department = str(basic['ultmtJdbnNm']).strip()
+    telephone = str(basic.get('telNo') or '').strip()
+    if department and telephone and str(basic.get('csPrsrvYn') or '') != 'Y':
+        department += f' (전화:{telephone})'
+    data['재판부'] = department
+    data['접수일'] = format_court_date(basic.get('csRcptYmd'))
+
+    final_date = format_court_date(basic.get('csUltmtYmd'))
+    final_name = str(basic.get('csUltmtDvsNm') or '').strip()
+    data['종국결과'] = ' '.join(part for part in (final_date, final_name) if part)
+    data['결정문송달일'] = format_court_date(basic.get('dcsnstDlvrYmd'))
+    data['확정일'] = format_court_date(basic.get('csCfmtnYmd'))
+
+    related = basic_data.get('dlt_reltCsLst') or []
+    if related:
+        first = related[0] or {}
+        data['관련사건_법원'] = str(first.get('reltCsCortNm') or '')
+        data['관련사건_번호'] = str(first.get('userCsNo') or '')
+
+    applicants, respondents = [], []
+    for party in basic_data.get('dlt_btprtCttLst') or []:
+        division = str((party or {}).get('btprtDvsNm') or '')
+        name = str((party or {}).get('btprtNm') or '').strip()
+        if not name:
+            continue
+        if '신청인' in division and '피' not in division:
+            applicants.append(name)
+        elif '피신청인' in division:
+            respondents.append(name)
+    data['신청인'] = ', '.join(applicants)
+    data['피신청인'] = ', '.join(respondents)
+
+    progress_rows = progress_data.get('dlt_csProgCtt') or []
+    for slot, row in enumerate(progress_rows[-3:][::-1], 1):
+        row = row or {}
+        data[f'진행_{slot}일자'] = format_court_date(row.get('progYmd'))
+        data[f'진행_{slot}내용'] = str(row.get('progCtt') or '')
+        data[f'진행_{slot}결과'] = str(row.get('progRslt') or '')
+        notice = row.get('pntcImg')
+        data[f'진행_{slot}공시문'] = (
+            str(notice) if notice not in (None, '', 'N', 'Y', 0, 1) else ''
+        )
+    return data
+
+
+async def wait_for_captcha_info(
+    page: Page,
+    after_generation: int = -1,
+    timeout_ms: int = 8000,
+) -> dict | None:
+    """페이지가 받은 캡차 이미지와 암호화 answer를 응답 훅에서 가져온다."""
+    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
+    while asyncio.get_running_loop().time() < deadline:
+        generation = int(getattr(page, '_captcha_generation', 0))
+        info = getattr(page, '_captcha_info', None)
+        if info and generation > after_generation:
+            return info
+        await page.wait_for_timeout(100)
+    return None
+
+
+async def refresh_captcha_info(page: Page) -> dict | None:
+    """새 캡차를 요청하고 이전 응답과 다른 세대가 도착할 때까지 기다린다."""
+    previous = int(getattr(page, '_captcha_generation', 0))
+    reload_button = page.locator(SEL_CAPTCHA_RELOAD)
+    if await reload_button.count() == 0:
+        return None
+    await reload_button.click()
+    return await wait_for_captcha_info(page, previous)
+
+
+async def post_court_json(page: Page, endpoint: str, search_data: dict) -> dict:
+    """현재 브라우저 쿠키를 유지한 채 WebSquare 상세조회 JSON을 직접 호출한다."""
+    return await page.evaluate("""
+        async ({endpoint, searchData}) => {
+          try {
+            const response = await fetch(endpoint, {
+              method: 'POST',
+              credentials: 'same-origin',
+              headers: {
+                'Accept': 'application/json, text/plain, */*',
+                'Content-Type': 'application/json;charset=UTF-8',
+                'Submissionid': 'sbm_search'
+              },
+              body: JSON.stringify({dma_search: searchData})
+            });
+            const text = await response.text();
+            let payload = null;
+            try { payload = JSON.parse(text); } catch (_) {}
+            return {
+              http_status: response.status,
+              payload,
+              preview: text.slice(0, 500)
+            };
+          } catch (error) {
+            return {
+              http_status: 0,
+              payload: null,
+              preview: String(error)
+            };
+          }
+        }
+    """, {'endpoint': endpoint, 'searchData': search_data})
+
+
+async def direct_api_result(
+    page: Page,
+    court: str,
+    case_no: str,
+    case_type: str,
+    year: str,
+    serial: str,
+    party_name: str,
+    captcha_answer: str,
+) -> tuple[str, dict | None]:
+    """결과 화면 전환 없이 기본내용·진행내용 JSON을 받아 파싱한다."""
+    captcha_info = await wait_for_captcha_info(page)
+    encrypted_answer = str((captcha_info or {}).get('answer') or '')
+    if not encrypted_answer:
+        print('  ⚠ 직접조회용 캡차 토큰 미확인 — 기존 화면 조회로 전환')
+        return 'unsupported', None
+
+    try:
+        court_code = await page.locator(SEL_COURT).input_value()
+        case_type_code = await page.locator(SEL_TYPE).input_value()
+        task_code = await page.evaluate(
+            "name => window.properties?.['ctt.csDvsNm.' + name] || ''",
+            case_type,
+        )
+    except Exception as error:
+        print(f'  ⚠ 직접조회 코드 확인 실패: {str(error)[:180]}')
+        return 'unsupported', None
+    api_path = TASK_API_PATHS.get(str(task_code or ''))
+    if not court_code or not case_type_code or not api_path:
+        print(
+            f'  ⚠ 직접조회 미지원 유형: court={court_code}, '
+            f'type={case_type_code}, task={task_code}'
+        )
+        return 'unsupported', None
+
+    search_data = {
+        'cortCd': court_code,
+        'csNo': '',
+        'encCsNo': '',
+        'csYear': year,
+        'csDvsCd': case_type_code,
+        'csSerial': serial,
+        'btprtNm': party_name,
+        'captchaAnswer': captcha_answer + encrypted_answer,
+        'callDomain': '',
+        'csDvsNm': case_type,
+        'prwlKey': '',
+        'preProgYn': '',
+        'typ': '',
+        'atho': '',
+        'dcRgstNoIndctYn': '',
+        'myCslistLinkYn': '',
+        'mode': '',
+        'mcsDomain': '',
+        'callTyp': '',
+        'ckiStrgYn': '',
+        'link': '',
+        'linkValue': '',
+        'srchDvs': '',
+        'nrlnmDvsCd': '',
+        'inqScop': '',
+        'inUseCallDomain': '',
+        'etc1': '',
+        'etc2': '',
+        'etc3': '',
+    }
+    base_url = f'/ssgo/ssgo{api_path}'
+    basic_response = await post_court_json(
+        page,
+        f'{base_url}/selectHmpgEtexecCsGnrlCtt.on',
+        search_data,
+    )
+    http_status = int(basic_response.get('http_status') or 0)
+    payload = basic_response.get('payload') or {}
+    message = str(payload.get('message') or basic_response.get('preview') or '')
+    if http_status == 550 or '캡챠' in message or '방지문자' in message:
+        print('  캡차 불일치 → JSON 직접조회 재시도')
+        return 'captcha_mismatch', None
+    if http_status != 200 or int(payload.get('status') or 0) != 200:
+        print(
+            f"  ⚠ JSON 기본내용 조회 실패: HTTP {http_status}, "
+            f"{message[:180]} — 기존 화면 조회로 전환"
+        )
+        return 'protocol_error', None
+    basic = (payload.get('data') or {}).get('dma_csBasCtt') or {}
+    if not basic.get('csNm'):
+        print('  ⚠ JSON 기본내용에 사건명이 없음 — 기존 화면 조회로 전환')
+        return 'protocol_error', None
+    returned_case = str(basic.get('userCsNo') or '')
+    if returned_case and returned_case != case_no:
+        print(
+            f'  ⚠ JSON 사건번호 불일치: 요청 {case_no}, 응답 {returned_case}'
+        )
+        return 'protocol_error', None
+
+    progress_data = dict(search_data)
+    progress_data['progCttDvs'] = '0'
+    progress_response = await post_court_json(
+        page,
+        f'{base_url}/selectHmpgEtexecCsProgCtt.on',
+        progress_data,
+    )
+    progress_payload = progress_response.get('payload') or {}
+    if (
+        int(progress_response.get('http_status') or 0) != 200
+        or int(progress_payload.get('status') or 0) != 200
+    ):
+        print('  ⚠ JSON 진행내용 조회 실패 — 기존 화면 조회로 전환')
+        return 'protocol_error', None
+
+    result = parse_direct_api_result(
+        payload, progress_payload, court, case_no
+    )
+    print(f"  ⚡ JSON 직접조회 완료: 사건명={result['사건명']}")
+    return 'success', result
+
+
 # ──────────────────────────────────────────────
 # 결과 파싱 (신규 사이트 구조 기준)
 # ──────────────────────────────────────────────
@@ -769,6 +1035,12 @@ async def search_one(
         if not reuse_enabled:
             return data
         if result_page:
+            # JSON 고속 경로가 실패해 기존 화면으로 폴백한 경우 결과 화면의
+            # '검색화면' 버튼은 빈 /index.on으로 이동한다. 이미 검증된 실패
+            # 경로를 다시 기다리지 말고 다음 사건에서 정상 URL을 연다.
+            if DIRECT_API_PATH:
+                session_state['form_ready'] = False
+                return data
             ready = await return_to_search_form(page, debug_label=case_no)
             session_state['form_ready'] = ready
             if ready:
@@ -862,12 +1134,24 @@ async def search_one(
 
             # ── 캡차 ──
             stage = '캡차 인식'
-            if attempt > 1:
-                # 캡차 새로고침 버튼 클릭
-                reload_btn = page.locator(SEL_CAPTCHA_RELOAD)
-                if await reload_btn.count() > 0:
-                    await reload_btn.click()
-                    await page.wait_for_timeout(800)
+            direct_active = (
+                DIRECT_API_PATH
+                and not session_state.get('direct_api_disabled', False)
+            )
+            needs_new_captcha = attempt > 1 or (
+                direct_active and session_state.get('captcha_consumed', False)
+            )
+            if needs_new_captcha:
+                if direct_active:
+                    refreshed = await refresh_captcha_info(page)
+                    if not refreshed:
+                        print('  ⚠ 새 캡차 응답을 확인하지 못했습니다.')
+                    session_state['captcha_consumed'] = False
+                else:
+                    reload_btn = page.locator(SEL_CAPTCHA_RELOAD)
+                    if await reload_btn.count() > 0:
+                        await reload_btn.click()
+                        await page.wait_for_timeout(800)
 
             captcha_answer, captcha_image, captcha_source = await get_captcha_answer(
                 page,
@@ -880,6 +1164,44 @@ async def search_one(
                 print(f"  캡차 OCR 실패 — 재시도 {attempt}")
                 await page.wait_for_timeout(500)
                 continue
+
+            if direct_active:
+                stage = 'JSON 직접조회'
+                direct_status, direct_result = await direct_api_result(
+                    page,
+                    court,
+                    case_no,
+                    case_type,
+                    year,
+                    serial,
+                    party_name,
+                    captcha_answer,
+                )
+                if direct_status == 'success':
+                    session_state['captcha_consumed'] = True
+                    session_state['direct_api_successes'] = (
+                        int(session_state.get('direct_api_successes', 0)) + 1
+                    )
+                    save_success_captcha(
+                        captcha_image, captcha_answer, captcha_source
+                    )
+                    return await finish(direct_result, result_page=False)
+                if direct_status == 'captcha_mismatch':
+                    session_state['captcha_consumed'] = True
+                    continue
+                if direct_status == 'protocol_error':
+                    session_state['captcha_consumed'] = True
+                    session_state['direct_api_disabled'] = True
+                    session_state['direct_api_fallbacks'] = (
+                        int(session_state.get('direct_api_fallbacks', 0)) + 1
+                    )
+                    continue
+                # 아직 API 호출 전인 미지원 유형이면 현재 캡차를 그대로
+                # 기존 화면 제출에 사용한다.
+                session_state['direct_api_disabled'] = True
+                session_state['direct_api_fallbacks'] = (
+                    int(session_state.get('direct_api_fallbacks', 0)) + 1
+                )
 
             await page.fill(SEL_CAPTCHA_INPUT, captcha_answer)
 
@@ -1222,6 +1544,8 @@ async def main():
         )
     if REUSE_SEARCH_SESSION and not prepare_only:
         print('♻ 검색 세션 재사용 실험 활성화')
+    if DIRECT_API_PATH and not prepare_only:
+        print('⚡ 결과 화면을 생략하는 JSON 직접조회 실험 활성화')
     async with async_playwright() as p:
         launch_options = {
             'headless': HEADLESS,
@@ -1242,6 +1566,8 @@ async def main():
             )
             page = await context.new_page()
             page._last_dialog_message = ''
+            page._captcha_info = None
+            page._captcha_generation = 0
 
             async def handle_dialog(dialog):
                 page._last_dialog_message = dialog.message
@@ -1249,6 +1575,25 @@ async def main():
                 await dialog.dismiss()
 
             page.on('dialog', handle_dialog)
+
+            async def capture_captcha_response(response):
+                if not response.url.endswith('/ssgo10l/getCaptchaInf.on'):
+                    return
+                try:
+                    payload = await response.json()
+                    info = ((payload or {}).get('data') or {}).get(
+                        'dma_captchaInf'
+                    ) or {}
+                    if info.get('image') and info.get('answer'):
+                        page._captcha_info = info
+                        page._captcha_generation += 1
+                except Exception as error:
+                    print(
+                        '  ⚠ 캡차 응답 포착 실패: '
+                        + str(error).replace('\n', ' ')[:160]
+                    )
+
+            page.on('response', capture_captcha_response)
             if env_enabled('COURT_TRACE_NETWORK'):
                 trace_host = urlparse(TARGET_URL).hostname
 
@@ -1494,6 +1839,14 @@ async def main():
             ),
             'reuse_fallbacks': sum(
                 int(state.get('reuse_fallbacks', 0)) for state in session_states
+            ),
+            'direct_api_successes': sum(
+                int(state.get('direct_api_successes', 0))
+                for state in session_states
+            ),
+            'direct_api_fallbacks': sum(
+                int(state.get('direct_api_fallbacks', 0))
+                for state in session_states
             ),
             'immediate_retries': len(retried_indices),
             'elapsed_seconds_before_output': round(
