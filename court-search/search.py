@@ -443,6 +443,41 @@ async def ws_select(page: Page, selector: str, value: str):
     return True
 
 
+async def ws_bound_value(page: Page, selector: str) -> tuple[str, dict]:
+    """렌더링용 DOM 값이 아닌 WebSquare 데이터 바인딩 값을 읽는다."""
+    diagnostic = await page.evaluate("""
+        selector => {
+          const element = document.querySelector(selector);
+          if (!element) return {dom: '', component: '', scoped: ''};
+          let component = '';
+          let scoped = '';
+          try {
+            const object = window.WebSquare?.util?.getComponentById?.(element.id);
+            component = object?.getValue?.() ?? '';
+          } catch (_) {}
+          try {
+            const object = window.$p?.getComponentById?.(element.id);
+            scoped = object?.getValue?.() ?? '';
+          } catch (_) {}
+          return {
+            id: element.id || '',
+            dom: element.value || '',
+            component: String(component || ''),
+            scoped: String(scoped || ''),
+            dataValue: element.getAttribute('data-value') || '',
+          };
+        }
+    """, selector)
+    value = (
+        diagnostic.get('component')
+        or diagnostic.get('scoped')
+        or diagnostic.get('dataValue')
+        or diagnostic.get('dom')
+        or ''
+    )
+    return str(value), diagnostic
+
+
 async def select_court(page: Page, court: str):
     """실제 사이트 옵션에서 법원명을 찾아 선택; 지원 약칭은 유일할 때만 허용."""
     await page.wait_for_function(
@@ -637,8 +672,8 @@ async def direct_api_result(
         return 'unsupported', None
 
     try:
-        court_code = await page.locator(SEL_COURT).input_value()
-        case_type_code = await page.locator(SEL_TYPE).input_value()
+        court_code, court_diagnostic = await ws_bound_value(page, SEL_COURT)
+        case_type_code, type_diagnostic = await ws_bound_value(page, SEL_TYPE)
         task_code = await page.evaluate(
             "name => window.properties?.['ctt.csDvsNm.' + name] || ''",
             case_type,
@@ -687,7 +722,8 @@ async def direct_api_result(
     }
     print(
         f'  🔎 JSON 요청 코드: court={court_code}, year={year}, '
-        f'type={case_type_code}, serial={serial}, task={task_code}'
+        f'type={case_type_code}, serial={serial}, task={task_code}; '
+        f'bindings={json.dumps({"court": court_diagnostic, "type": type_diagnostic}, ensure_ascii=False)}'
     )
     base_url = f'/ssgo/ssgo{api_path}'
     basic_response = await post_court_json(
