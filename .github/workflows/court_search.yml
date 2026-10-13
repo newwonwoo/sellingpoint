@@ -20,11 +20,11 @@ on:
         type: boolean
         required: false
         default: true
-      speed_experiment:
-        description: '성능실험 기능 활성화 (테스트 브랜치 전용)'
+      fast_mode:
+        description: '고속 조회 사용 (문제 발생 시 해제)'
         type: boolean
         required: false
-        default: false
+        default: true
       captcha_seed_run_id:
         description: '기존 실행의 통과 캡차를 최초 모델로 가져올 run ID (선택)'
         type: string
@@ -168,11 +168,11 @@ jobs:
           COURT_WORKERS: '3'
           COURT_MAX_WORKERS: '4'
           OCR_TORCH_THREADS: '2'
-          COURT_REUSE_SESSION: ${{ inputs.speed_experiment }}
-          # 20건 A/B에서 캡차 불일치가 15→45회로 늘어 실험 대상에서 제외.
+          COURT_REUSE_SESSION: ${{ inputs.fast_mode }}
+          # 고정 영역 OCR은 정확도가 낮아 사용하지 않고, 기존 검증 OCR을 유지한다.
           CAPTCHA_FAST_PATH: 'false'
-          COURT_IMMEDIATE_RETRY: ${{ inputs.speed_experiment }}
-          COURT_DIRECT_API: ${{ inputs.speed_experiment }}
+          COURT_IMMEDIATE_RETRY: ${{ inputs.fast_mode }}
+          COURT_DIRECT_API: ${{ inputs.fast_mode }}
           COURT_TRACE_NETWORK: 'false'
           CAPTCHA_DATA_DIR: court-search/captcha-success
           CAPTCHA_SEED_DIR: court-search/captcha-model
@@ -231,8 +231,8 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
-      - name: 실험 화면 진단자료 보관
-        if: ${{ always() && inputs.speed_experiment == true }}
+      - name: 고속조회 진단자료 보관
+        if: ${{ always() && inputs.fast_mode == true }}
         uses: actions/upload-artifact@v4
         with:
           name: court-search-debug
@@ -399,10 +399,10 @@ jobs:
           COURT_WORKERS: '3'
           COURT_MAX_WORKERS: '4'
           OCR_TORCH_THREADS: '2'
-          COURT_REUSE_SESSION: ${{ inputs.speed_experiment }}
+          COURT_REUSE_SESSION: ${{ inputs.fast_mode }}
           CAPTCHA_FAST_PATH: 'false'
-          COURT_IMMEDIATE_RETRY: ${{ inputs.speed_experiment }}
-          COURT_DIRECT_API: ${{ inputs.speed_experiment }}
+          COURT_IMMEDIATE_RETRY: ${{ inputs.fast_mode }}
+          COURT_DIRECT_API: ${{ inputs.fast_mode }}
           COURT_TRACE_NETWORK: 'false'
           CAPTCHA_DATA_DIR: court-search/captcha-success
           CAPTCHA_SEED_DIR: court-search/captcha-model

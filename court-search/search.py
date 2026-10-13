@@ -1599,9 +1599,9 @@ async def main():
             ocr_executor, warmup_captcha_solver
         )
     if REUSE_SEARCH_SESSION and not prepare_only:
-        print('♻ 검색 세션 재사용 실험 활성화')
+        print('♻ 검색 세션 재사용 활성화')
     if DIRECT_API_PATH and not prepare_only:
-        print('⚡ 결과 화면을 생략하는 JSON 직접조회 실험 활성화')
+        print('⚡ 결과 화면을 생략하는 JSON 고속조회 활성화')
     async with async_playwright() as p:
         launch_options = {
             'headless': HEADLESS,

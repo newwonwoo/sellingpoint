@@ -35,6 +35,7 @@ export default async function handler(req, res) {
             court,
             case_no: caseNo,
             party,
+            fast_mode: 'true',
           },
         }),
       },

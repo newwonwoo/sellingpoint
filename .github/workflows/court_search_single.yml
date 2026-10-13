@@ -21,6 +21,11 @@ on:
         type: string
         required: false
         default: '주택'
+      fast_mode:
+        description: '고속 조회 사용 (문제 발생 시 해제)'
+        type: boolean
+        required: false
+        default: true
 
 permissions:
   contents: read
@@ -144,6 +149,11 @@ jobs:
         env:
           COURT_WORKERS: '1'
           OCR_TORCH_THREADS: '2'
+          COURT_REUSE_SESSION: ${{ inputs.fast_mode }}
+          CAPTCHA_FAST_PATH: 'false'
+          COURT_IMMEDIATE_RETRY: ${{ inputs.fast_mode }}
+          COURT_DIRECT_API: ${{ inputs.fast_mode }}
+          COURT_TRACE_NETWORK: 'false'
           CAPTCHA_DATA_DIR: court-search/captcha-single-success
           CAPTCHA_SEED_DIR: court-search/captcha-model
           DEBUG_DIR: single-debug
@@ -307,6 +317,11 @@ jobs:
         env:
           COURT_WORKERS: '1'
           OCR_TORCH_THREADS: '2'
+          COURT_REUSE_SESSION: ${{ inputs.fast_mode }}
+          CAPTCHA_FAST_PATH: 'false'
+          COURT_IMMEDIATE_RETRY: ${{ inputs.fast_mode }}
+          COURT_DIRECT_API: ${{ inputs.fast_mode }}
+          COURT_TRACE_NETWORK: 'false'
           CAPTCHA_DATA_DIR: court-search/captcha-single-retry-success
           CAPTCHA_SEED_DIR: court-search/captcha-model
           DEBUG_DIR: single-retry-debug

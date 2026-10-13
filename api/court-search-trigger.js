@@ -87,7 +87,11 @@ export default async function handler(req, res) {
         body: JSON.stringify({
           ref: BRANCH,
           // 웹앱 제출은 사용자가 올린 input.xlsx를 실제 조회한다.
-          inputs: { input_file: 'input.xlsx', prepare_only: 'false' },
+          inputs: {
+            input_file: 'input.xlsx',
+            prepare_only: 'false',
+            fast_mode: 'true',
+          },
         }),
       }
     );
