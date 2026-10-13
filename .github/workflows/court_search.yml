@@ -123,23 +123,27 @@ jobs:
           "$COURT_PYTHON" -u court-search/connection_probe.py
           --timeout 8
           --browser-timeout 30
+          --artifacts-dir court-search/debug/connection-primary
           --output court-search/connection-diagnostic-batch-primary.json
 
       - name: 연결 진단 실패 결과 준비
         if: ${{ inputs.prepare_only == false && steps.court_connection.outcome != 'success' }}
         env:
           INPUT_FILE: ${{ inputs.input_file }}
+          DIAGNOSTIC_MESSAGE: ${{ steps.court_connection.outputs.message }}
         run: >-
           "$COURT_PYTHON" court-search/chunk_workbook.py blocked-output
           "court-search/$INPUT_FILE" court-search/output.xlsx
-          "법원 사이트 연결 진단 실패"
+          "${DIAGNOSTIC_MESSAGE:-법원 사이트 연결 진단 실패}"
 
       - name: 법원 연결 진단 기록 보관
         if: ${{ always() && inputs.prepare_only == false }}
         uses: actions/upload-artifact@v4
         with:
           name: court-connection-batch-primary
-          path: court-search/connection-diagnostic-batch-primary.json
+          path: |
+            court-search/connection-diagnostic-batch-primary.json
+            court-search/debug/connection-primary
           if-no-files-found: warn
           retention-days: 7
 
@@ -209,9 +213,12 @@ jobs:
           name_column = rows[0].index('사건명')
           failed = [row[:3] for row in rows[1:]
                     if not row[name_column] or str(row[name_column]).startswith(('조회실패', '조회보류'))]
-          connection_failures = [row for row in rows[1:] if str(row[name_column]).startswith((
-              '조회실패: 법원 사이트', '조회보류: 법원 사이트'
-          ))]
+          connection_failures = [row for row in rows[1:]
+                                 if str(row[name_column]).startswith((
+                                     '조회실패: 법원 사이트',
+                                     '조회보류: 법원 사이트',
+                                 ))
+                                 and '구조변경' not in str(row[name_column])]
           global_connection_failure = actual > 0 and len(connection_failures) == actual
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               print(f"global_connection_failure={'true' if global_connection_failure else 'false'}", file=output)
@@ -355,23 +362,27 @@ jobs:
           "$COURT_PYTHON" -u court-search/connection_probe.py
           --timeout 8
           --browser-timeout 30
+          --artifacts-dir court-search/debug/connection-retry
           --output court-search/connection-diagnostic-batch-retry.json
 
       - name: 연결 진단 실패 결과 준비
         if: ${{ steps.court_connection.outcome != 'success' }}
         env:
           INPUT_FILE: ${{ inputs.input_file }}
+          DIAGNOSTIC_MESSAGE: ${{ steps.court_connection.outputs.message }}
         run: >-
           "$COURT_PYTHON" court-search/chunk_workbook.py blocked-output
           "court-search/$INPUT_FILE" court-search/output.xlsx
-          "새 실행환경 법원 사이트 연결 진단 실패"
+          "${DIAGNOSTIC_MESSAGE:-새 실행환경 법원 사이트 연결 진단 실패}"
 
       - name: 법원 연결 진단 기록 보관
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: court-connection-batch-retry
-          path: court-search/connection-diagnostic-batch-retry.json
+          path: |
+            court-search/connection-diagnostic-batch-retry.json
+            court-search/debug/connection-retry
           if-no-files-found: warn
           retention-days: 7
 

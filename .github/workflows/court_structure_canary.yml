@@ -1,0 +1,205 @@
+name: 법원 사이트 구조 정기점검
+
+on:
+  workflow_dispatch:
+  schedule:
+    # 매일 한국시간 오전 7시 15분. 업무 시작 전 구조 변경을 먼저 찾는다.
+    - cron: '15 22 * * *'
+
+permissions:
+  contents: read
+  actions: write
+
+concurrency:
+  group: court-structure-canary
+  cancel-in-progress: false
+
+env:
+  COURT_PYTHON: court-search/.runtime-venv/bin/python
+  EASYOCR_MODEL_DIR: court-search/.easyocr-model
+  PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH: /usr/bin/google-chrome
+
+jobs:
+  canary:
+    name: 통신·화면·API 구조 점검
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: 체크아웃
+        uses: actions/checkout@v4
+
+      - name: 고속 조회환경 불러오기
+        id: runtime-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            court-search/.runtime-venv
+            court-search/.easyocr-model
+          key: court-search-runtime-v3-cpu-ubuntu-24.04-${{ hashFiles('court-search/requirements.txt') }}
+
+      - name: 캐시 없을 때 조회환경 준비
+        if: ${{ steps.runtime-cache.outputs.cache-hit != 'true' }}
+        run: |
+          python3 -m venv court-search/.runtime-venv
+          "$COURT_PYTHON" -m pip install --upgrade pip
+          "$COURT_PYTHON" -m pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
+          "$COURT_PYTHON" -m pip install -r court-search/requirements.txt
+          "$COURT_PYTHON" - <<'PY'
+          import easyocr
+          easyocr.Reader(
+              ['en'], gpu=False, verbose=False,
+              model_storage_directory='court-search/.easyocr-model',
+          )
+          PY
+
+      - name: 점검환경 확인
+        run: |
+          test -x "$COURT_PYTHON"
+          test -x "$PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH"
+          "$COURT_PYTHON" -c "import easyocr, openpyxl, playwright; print('구조 점검환경 준비 완료')"
+
+      - name: 누적 캡차 모델 불러오기
+        uses: actions/cache/restore@v4
+        with:
+          path: court-search/captcha-model
+          key: court-captcha-v2-${{ github.run_id }}
+          restore-keys: |
+            court-captcha-v2-
+
+      - name: 검증 사건 준비
+        run: |
+          mkdir -p court-search/health
+          "$COURT_PYTHON" - <<'PY'
+          import json
+          from pathlib import Path
+          Path('court-search/health/canary-input.json').write_text(
+              json.dumps({
+                  'court': '서울남부지방법원',
+                  'case_no': '2026타인3944',
+                  'party': '주택',
+              }, ensure_ascii=False),
+              encoding='utf-8',
+          )
+          PY
+
+      - name: 통신·화면 구조 진단
+        id: diagnosis
+        continue-on-error: true
+        run: >-
+          "$COURT_PYTHON" -u court-search/connection_probe.py
+          --timeout 8
+          --browser-timeout 30
+          --artifacts-dir court-search/health/debug/connection
+          --output court-search/health/connection.json
+
+      - name: API·결과 구조 검증
+        id: lookup
+        if: ${{ steps.diagnosis.outcome == 'success' }}
+        continue-on-error: true
+        env:
+          COURT_WORKERS: '1'
+          OCR_TORCH_THREADS: '2'
+          COURT_REUSE_SESSION: 'true'
+          CAPTCHA_FAST_PATH: 'false'
+          COURT_IMMEDIATE_RETRY: 'false'
+          COURT_DIRECT_API: 'true'
+          COURT_TRACE_NETWORK: 'false'
+          CAPTCHA_DATA_DIR: court-search/health/captcha-success
+          CAPTCHA_SEED_DIR: court-search/captcha-model
+          DEBUG_DIR: court-search/health/debug
+          DEBUG_TABLES: '0'
+        run: >-
+          "$COURT_PYTHON" -u court-search/search.py
+          court-search/health/canary-input.json
+          court-search/health/canary-result.json
+
+      - name: 구조 점검 보고서 생성
+        if: always()
+        env:
+          DIAGNOSIS_OUTCOME: ${{ steps.diagnosis.outcome }}
+          DIAGNOSIS_CLASSIFICATION: ${{ steps.diagnosis.outputs.classification }}
+          DIAGNOSIS_MESSAGE: ${{ steps.diagnosis.outputs.message }}
+          CONTRACT_FINGERPRINT: ${{ steps.diagnosis.outputs.fingerprint }}
+          LOOKUP_OUTCOME: ${{ steps.lookup.outcome }}
+          RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          "$COURT_PYTHON" - <<'PY'
+          import json
+          import os
+          from datetime import datetime, timezone
+          from pathlib import Path
+
+          diagnosis = os.environ.get('DIAGNOSIS_OUTCOME', '')
+          classification = os.environ.get('DIAGNOSIS_CLASSIFICATION', '')
+          lookup = os.environ.get('LOOKUP_OUTCOME', '')
+          result_path = Path('court-search/health/canary-result.json')
+          row = {}
+          if result_path.exists():
+              rows = json.loads(result_path.read_text(encoding='utf-8')).get('results', [])
+              row = rows[0] if rows else {}
+          name = str(row.get('사건명') or '')
+          valid_result = (
+              row.get('사건번호') == '2026타인3944'
+              and '부동산인도명령' in name
+              and not name.startswith(('조회실패', '조회보류'))
+          )
+
+          if diagnosis != 'success':
+              status = 'structure_changed' if classification in {
+                  'FORM_CHANGED', 'CAPTCHA_CHANGED'
+              } else 'unavailable'
+          elif lookup != 'success' or not valid_result:
+              status = 'structure_changed'
+              classification = 'API_OR_RESULT_CHANGED'
+          else:
+              status = 'healthy'
+              classification = 'HEALTHY'
+
+          if status == 'healthy':
+              message = '법원 사이트 통신·화면·API 구조 정상'
+          elif classification == 'API_OR_RESULT_CHANGED':
+              message = '법원 사이트 API 또는 결과 구조변경 감지'
+          else:
+              message = os.environ.get('DIAGNOSIS_MESSAGE') or (
+                  '법원 사이트 접속 또는 구조 점검 실패'
+              )
+
+          report = {
+              'status': status,
+              'classification': classification or 'UNKNOWN',
+              'message': message,
+              'checkedAt': datetime.now(timezone.utc).isoformat(timespec='seconds'),
+              'fingerprint': os.environ.get('CONTRACT_FINGERPRINT', ''),
+              'runUrl': os.environ.get('RUN_URL', ''),
+              'canary': {
+                  'court': '서울남부지방법원',
+                  'caseNo': '2026타인3944',
+                  'caseNameMatched': valid_result,
+              },
+          }
+          Path('court-search/health/health-report.json').write_text(
+              json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8'
+          )
+          print(json.dumps(report, ensure_ascii=False))
+          PY
+
+      - name: 구조 점검자료 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: court-structure-health
+          path: court-search/health
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 점검 결과 확정
+        if: always()
+        run: |
+          "$COURT_PYTHON" - <<'PY'
+          import json
+          from pathlib import Path
+          report = json.loads(Path('court-search/health/health-report.json').read_text(encoding='utf-8'))
+          if report['status'] != 'healthy':
+              raise SystemExit('❌ ' + report['message'] + ' (' + report['classification'] + ')')
+          print('✅ 법원 사이트 통신·화면·API 구조 점검 정상')
+          PY

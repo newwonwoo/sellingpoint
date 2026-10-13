@@ -113,6 +113,7 @@ jobs:
           "$COURT_PYTHON" -u court-search/connection_probe.py
           --timeout 8
           --browser-timeout 30
+          --artifacts-dir single-debug/connection
           --output court-search/connection-diagnostic-primary.json
 
       - name: 연결 진단 실패 결과 준비
@@ -120,6 +121,7 @@ jobs:
         env:
           COURT: ${{ inputs.court }}
           CASE_NO: ${{ inputs.case_no }}
+          DIAGNOSTIC_MESSAGE: ${{ steps.court_connection.outputs.message }}
         run: |
           "$COURT_PYTHON" - <<'PY'
           import json, os
@@ -129,7 +131,10 @@ jobs:
               'results': [{
                   '법원': os.environ['COURT'].strip(),
                   '사건번호': os.environ['CASE_NO'].strip(),
-                  '사건명': '조회보류: 실행환경 연결 진단 실패',
+                  '사건명': '조회보류: ' + (
+                      os.environ.get('DIAGNOSTIC_MESSAGE')
+                      or '실행환경 연결 진단 실패'
+                  ),
                   '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
               }],
           }, ensure_ascii=False), encoding='utf-8')
@@ -140,7 +145,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: court-connection-primary
-          path: court-search/connection-diagnostic-primary.json
+          path: |
+            court-search/connection-diagnostic-primary.json
+            single-debug/connection
           if-no-files-found: warn
           retention-days: 7
 
@@ -174,7 +181,9 @@ jobs:
           if len(rows) != 1:
               raise SystemExit(f'단건 결과 행 수 오류: {len(rows)}')
           name = str(rows[0].get('사건명') or '')
-          print(f"retry_required={'true' if name.startswith(('조회실패', '조회보류')) else 'false'}")
+          failed = name.startswith(('조회실패', '조회보류'))
+          retryable = failed and '구조변경' not in name
+          print(f"retry_required={'true' if retryable else 'false'}")
           PY
 
       - name: 단건 1차 JSON 결과 보관
@@ -184,6 +193,15 @@ jobs:
           name: court-search-single-primary
           path: court-search/single-result.json
           if-no-files-found: error
+          retention-days: 7
+
+      - name: 단건 구조 진단자료 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: court-search-single-debug-primary
+          path: single-debug
+          if-no-files-found: ignore
           retention-days: 7
 
       - name: 단건 성공 JSON 즉시 공개
@@ -281,6 +299,7 @@ jobs:
           "$COURT_PYTHON" -u court-search/connection_probe.py
           --timeout 8
           --browser-timeout 30
+          --artifacts-dir single-retry-debug/connection
           --output court-search/connection-diagnostic-retry.json
 
       - name: 연결 진단 실패 결과 준비
@@ -288,6 +307,7 @@ jobs:
         env:
           COURT: ${{ inputs.court }}
           CASE_NO: ${{ inputs.case_no }}
+          DIAGNOSTIC_MESSAGE: ${{ steps.court_connection.outputs.message }}
         run: |
           "$COURT_PYTHON" - <<'PY'
           import json, os
@@ -297,7 +317,10 @@ jobs:
               'results': [{
                   '법원': os.environ['COURT'].strip(),
                   '사건번호': os.environ['CASE_NO'].strip(),
-                  '사건명': '조회실패: 새 실행환경 연결 진단 실패',
+                  '사건명': '조회실패: ' + (
+                      os.environ.get('DIAGNOSTIC_MESSAGE')
+                      or '새 실행환경 연결 진단 실패'
+                  ),
                   '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
               }],
           }, ensure_ascii=False), encoding='utf-8')
@@ -308,7 +331,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: court-connection-retry
-          path: court-search/connection-diagnostic-retry.json
+          path: |
+            court-search/connection-diagnostic-retry.json
+            single-retry-debug/connection
           if-no-files-found: warn
           retention-days: 7
 
@@ -338,6 +363,15 @@ jobs:
           name: court-search-single-retry
           path: court-search/single-retry-result.json
           if-no-files-found: error
+          retention-days: 7
+
+      - name: 단건 재조회 구조 진단자료 보관
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: court-search-single-debug-retry
+          path: single-retry-debug
+          if-no-files-found: ignore
           retention-days: 7
 
       - name: 재조회 통과 캡차 후보 확정

@@ -32,6 +32,15 @@ from captcha_solver import (
     warmup_captcha_solver,
 )
 from output_schema import OUTPUT_HEADERS, write_output
+from site_contract import (
+    CONTRACT_VERSION,
+    FORM_INSPECTION_JS,
+    fingerprint as contract_fingerprint,
+    inspection_argument,
+    json_schema_snapshot,
+    selector_union,
+    validate_direct_payloads,
+)
 
 # ──────────────────────────────────────────────
 # 설정
@@ -47,6 +56,11 @@ MAX_CONNECTION_RETRY = 3
 # 서로 다른 브라우저 세션이 모두 첫 화면 초기화에 실패할 때만 사이트 전체
 # 접속 장애로 본다. 한 세션의 연속 오류만으로 전체 배치를 중단하면 안 된다.
 MAX_GLOBAL_CONNECTION_FAILURES = 3
+# 서로 다른 사건에서 같은 API 계약 오류가 반복될 때 전체 워커가 즉시
+# 화면 조회 방식으로 전환한다. 한 번의 일시 응답만으로 끄지는 않는다.
+MAX_DIRECT_CONTRACT_FAILURES = 2
+# API와 화면 방식이 모두 깨진 경우 수백 건을 같은 방식으로 반복하지 않는다.
+MAX_GLOBAL_STRUCTURE_FAILURES = 2
 HEADLESS = True
 
 
@@ -131,15 +145,15 @@ CASE_TYPE_MAP = {
 }
 
 # ── WebSquare 셀렉터 (신규 사이트) ────────────
-SEL_COURT   = '#mf_ssgoTopMainTab_contents_content1_body_sbx_cortCd'
-SEL_YEAR    = '#mf_ssgoTopMainTab_contents_content1_body_sbx_csYr'
-SEL_TYPE    = '#mf_ssgoTopMainTab_contents_content1_body_sbx_csDvsCd'
-SEL_SERIAL  = '#mf_ssgoTopMainTab_contents_content1_body_ibx_csSerial'
-SEL_PARTY   = '#mf_ssgoTopMainTab_contents_content1_body_ibx_btprNm'
-SEL_CAPTCHA_INPUT  = '#mf_ssgoTopMainTab_contents_content1_body_ibx_answer'
-SEL_CAPTCHA_IMG    = '#mf_ssgoTopMainTab_contents_content1_body_img_captcha'
-SEL_CAPTCHA_RELOAD = '#mf_ssgoTopMainTab_contents_content1_body_btn_reloadCaptcha'
-SEL_SEARCH  = '#mf_ssgoTopMainTab_contents_content1_body_btn_srchCs'
+SEL_COURT = selector_union('court')
+SEL_YEAR = selector_union('year')
+SEL_TYPE = selector_union('case_type')
+SEL_SERIAL = selector_union('serial')
+SEL_PARTY = selector_union('party')
+SEL_CAPTCHA_INPUT = selector_union('captcha_input')
+SEL_CAPTCHA_IMG = selector_union('captcha_image')
+SEL_CAPTCHA_RELOAD = selector_union('captcha_reload')
+SEL_SEARCH = selector_union('search')
 
 # 일괄 조회는 검증된 3워커로 시작하고, 최근 처리 속도와 성공률이 안정적인
 # 경우에만 네 번째 워커를 연다. 법원 사이트에 같은 실행기에서 5개 이상의
@@ -211,6 +225,64 @@ def parse_case_no(case_no: str):
     if not m:
         raise ValueError(f"사건번호 형식 오류: {case_no}")
     return m.group(1), m.group(2), m.group(3)
+
+
+class SiteContractChanged(RuntimeError):
+    """페이지는 열렸지만 필수 화면 요소의 의미 계약이 달라진 경우."""
+
+    def __init__(self, classification: str, report: dict):
+        self.classification = classification
+        self.report = report
+        missing = (
+            report.get('missingForm', [])
+            if classification == 'FORM_CHANGED'
+            else report.get('missingCaptcha', [])
+        )
+        super().__init__(f"{classification}: {', '.join(missing) or 'unknown'}")
+
+
+async def ensure_site_contract(page: Page, timeout_ms: int = 15000) -> dict:
+    """정확한 ID와 의미 기반 후보를 이용해 현재 검색 폼 계약을 확인한다."""
+    deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
+    report = {}
+    while asyncio.get_running_loop().time() < deadline:
+        try:
+            report = await page.evaluate(
+                FORM_INSPECTION_JS, inspection_argument()
+            )
+        except Exception:
+            report = {}
+        if report.get('formOk') and report.get('captchaOk'):
+            contract_view = {
+                'version': CONTRACT_VERSION,
+                'resolved': report.get('resolved') or {},
+            }
+            report['fingerprint'] = contract_fingerprint(contract_view)
+            page._court_contract = report
+            return report
+        await page.wait_for_timeout(250)
+
+    page._court_contract = report
+    if not report.get('formOk'):
+        raise SiteContractChanged('FORM_CHANGED', report)
+    raise SiteContractChanged('CAPTCHA_CHANGED', report)
+
+
+def register_shared_failure(
+    circuit: dict,
+    bucket_name: str,
+    event_name: str,
+    case_no: str,
+    threshold: int,
+) -> tuple[int, bool]:
+    """서로 다른 사건의 동일 계열 실패를 세어 전역 차단기를 연다."""
+    failures = circuit.setdefault(bucket_name, set())
+    failures.add(case_no)
+    event = circuit.setdefault(event_name, asyncio.Event())
+    opened = len(failures) >= threshold
+    if opened:
+        event.set()
+    return len(failures), opened
 
 
 # ──────────────────────────────────────────────
@@ -483,7 +555,7 @@ async def select_court(page: Page, court: str):
     await page.wait_for_function(
         '(selector) => document.querySelector(selector)?.options.length > 10',
         arg=SEL_COURT, timeout=20000)
-    options = await page.locator(SEL_COURT + ' option').evaluate_all(
+    options = await page.locator(SEL_COURT).locator('option').evaluate_all(
         '(options) => options.map(o => ({value: o.value, label: o.textContent.trim()}))'
     )
     name = re.sub(r'\s+', '', court)
@@ -660,6 +732,44 @@ async def post_court_json(page: Page, endpoint: str, search_data: dict) -> dict:
     """, {'endpoint': endpoint, 'searchData': search_data})
 
 
+async def save_contract_debug(
+    page: Page,
+    case_no: str,
+    classification: str,
+    details: dict | None = None,
+):
+    """구조변경 증거를 값 없이 저장하고 화면 자료를 함께 남긴다."""
+    root = Path(os.environ.get('DEBUG_DIR', '/tmp/court-search-debug'))
+    root.mkdir(parents=True, exist_ok=True)
+    safe = re.sub(r'[^0-9A-Za-z가-힣_-]', '_', case_no)
+    event = {
+        'detected_at': datetime.now().isoformat(timespec='seconds'),
+        'contract_version': CONTRACT_VERSION,
+        'classification': classification,
+        'case_no': case_no,
+        'details': details or {},
+    }
+    event['fingerprint'] = contract_fingerprint(event['details'])
+    (root / f'{safe}-contract.json').write_text(
+        json.dumps(event, ensure_ascii=False, indent=2), encoding='utf-8'
+    )
+    with (root / 'contract-events.jsonl').open('a', encoding='utf-8') as stream:
+        stream.write(json.dumps(event, ensure_ascii=False) + '\n')
+    try:
+        await page.screenshot(
+            path=str(root / f'{safe}-contract.png'), full_page=True
+        )
+    except Exception as error:
+        print(f'  구조 진단 화면 캡처 실패: {error}')
+    try:
+        (root / f'{safe}-contract.html').write_text(
+            await page.content(), encoding='utf-8'
+        )
+    except Exception as error:
+        print(f'  구조 진단 DOM 저장 실패: {error}')
+    print(f'  구조변경 진단 저장: {root / (safe + "-contract.json")}')
+
+
 async def direct_api_result(
     page: Page,
     court: str,
@@ -753,17 +863,48 @@ async def direct_api_result(
             f"  ⚠ JSON 기본내용 조회 실패: HTTP {http_status}, "
             f"{combined_message[:180]} — 기존 화면 조회로 전환"
         )
+        await save_contract_debug(
+            page,
+            case_no,
+            'API_PROTOCOL_ERROR',
+            {
+                'http_status': http_status,
+                'payload_status': payload.get('status'),
+                'schema': json_schema_snapshot(payload),
+                'basic_endpoint': f'{base_url}/selectHmpgEtexecCsGnrlCtt.on',
+            },
+        )
         return 'protocol_error', None
     basic = (payload.get('data') or {}).get('dma_csBasCtt') or {}
     if not basic.get('csNm'):
-        print('  ⚠ JSON 기본내용에 사건명이 없음 — 기존 화면 조회로 전환')
-        return 'protocol_error', None
-    returned_case = str(basic.get('userCsNo') or '')
-    if returned_case and returned_case != case_no:
+        print('  🧩 JSON 기본내용 구조변경 감지: 사건명 없음 — 기존 화면 조회로 전환')
+        await save_contract_debug(
+            page,
+            case_no,
+            'API_CHANGED',
+            {
+                'errors': ['case_name_missing'],
+                'schema': json_schema_snapshot(payload),
+                'basic_endpoint': f'{base_url}/selectHmpgEtexecCsGnrlCtt.on',
+            },
+        )
+        return 'contract_changed', None
+    returned_case = re.sub(r'\s+', '', str(basic.get('userCsNo') or ''))
+    if returned_case and returned_case != re.sub(r'\s+', '', case_no):
         print(
             f'  ⚠ JSON 사건번호 불일치: 요청 {case_no}, 응답 {returned_case}'
         )
-        return 'protocol_error', None
+        await save_contract_debug(
+            page,
+            case_no,
+            'API_CHANGED',
+            {
+                'errors': ['case_number_mismatch'],
+                'schema': json_schema_snapshot(payload),
+                'basic_endpoint': f'{base_url}/selectHmpgEtexecCsGnrlCtt.on',
+            },
+        )
+        return 'contract_changed', None
 
     progress_data = dict(search_data)
     progress_data['progCttDvs'] = '0'
@@ -778,7 +919,40 @@ async def direct_api_result(
         or int(progress_payload.get('status') or 0) != 200
     ):
         print('  ⚠ JSON 진행내용 조회 실패 — 기존 화면 조회로 전환')
+        await save_contract_debug(
+            page,
+            case_no,
+            'API_PROTOCOL_ERROR',
+            {
+                'http_status': progress_response.get('http_status'),
+                'payload_status': progress_payload.get('status'),
+                'schema': json_schema_snapshot(progress_payload),
+                'progress_endpoint': f'{base_url}/selectHmpgEtexecCsProgCtt.on',
+            },
+        )
         return 'protocol_error', None
+
+    validation = validate_direct_payloads(payload, progress_payload, case_no)
+    if not validation['ok']:
+        print(
+            '  🧩 JSON 구조변경 감지: '
+            + ', '.join(validation['errors'])
+            + ' — 기존 화면 조회로 전환'
+        )
+        await save_contract_debug(
+            page,
+            case_no,
+            'API_CHANGED',
+            {
+                'errors': validation['errors'],
+                'warnings': validation['warnings'],
+                'schema': validation['schema'],
+                'schema_fingerprint': validation['fingerprint'],
+                'basic_endpoint': f'{base_url}/selectHmpgEtexecCsGnrlCtt.on',
+                'progress_endpoint': f'{base_url}/selectHmpgEtexecCsProgCtt.on',
+            },
+        )
+        return 'contract_changed', None
 
     result = parse_direct_api_result(
         payload, progress_payload, court, case_no
@@ -985,9 +1159,12 @@ def record_adaptive_health(state: dict, result: dict, duration: float):
     if not state['enabled']:
         return
     name = str(result.get('사건명', ''))
-    connection_failure = name.startswith((
-        '조회실패: 법원 사이트', '조회보류: 법원 사이트'
-    ))
+    connection_failure = (
+        name.startswith((
+            '조회실패: 법원 사이트', '조회보류: 법원 사이트'
+        ))
+        and '구조변경' not in name
+    )
     state['samples'].append({
         'success': bool(name) and not name.startswith(('조회실패', '조회보류')),
         'connection_failure': connection_failure,
@@ -1119,8 +1296,18 @@ async def search_one(
             'required_failed_sessions': MAX_GLOBAL_CONNECTION_FAILURES,
             'event': asyncio.Event(),
             'diagnosed': False,
+            'direct_contract_failures': set(),
+            'direct_event': asyncio.Event(),
+            'structure_failures': set(),
+            'structure_event': asyncio.Event(),
         }
     circuit_event = connection_circuit['event']
+    direct_event = connection_circuit.setdefault(
+        'direct_event', asyncio.Event()
+    )
+    structure_event = connection_circuit.setdefault(
+        'structure_event', asyncio.Event()
+    )
 
     if reuse_enabled and await search_form_ready(page):
         page_ready = True
@@ -1130,6 +1317,9 @@ async def search_one(
 
     for attempt in range(1, (1 if prepare_only else MAX_CAPTCHA_RETRY) + 1):
         try:
+            if structure_event.is_set():
+                failure_reason = '법원 사이트 구조변경 감지'
+                break
             # 페이지 이동. 캡차 불일치 재시도는 현재 화면을 유지하지만,
             # 접속/렌더링 오류 뒤에는 빈 페이지를 재사용하지 않는다.
             if not page_ready:
@@ -1148,8 +1338,11 @@ async def search_one(
                         wait_until='domcontentloaded',
                         timeout=40000,
                     )
-                    # WebSquare 초기화 대기
-                    await page.wait_for_selector(SEL_COURT, timeout=15000)
+                    # WebSquare 초기화와 필수 입력·캡차 계약을 함께 확인한다.
+                    contract = await ensure_site_contract(page, timeout_ms=15000)
+                    session_state['contract_fingerprint'] = contract.get(
+                        'fingerprint', ''
+                    )
                 except Exception:
                     raise
                 else:
@@ -1193,6 +1386,7 @@ async def search_one(
             direct_active = (
                 DIRECT_API_PATH
                 and not session_state.get('direct_api_disabled', False)
+                and not direct_event.is_set()
             )
             needs_new_captcha = attempt > 1 or (
                 direct_active and session_state.get('captcha_consumed', False)
@@ -1245,12 +1439,25 @@ async def search_one(
                 if direct_status == 'captcha_mismatch':
                     session_state['captcha_consumed'] = True
                     continue
-                if direct_status == 'protocol_error':
+                if direct_status in {'protocol_error', 'contract_changed'}:
                     session_state['captcha_consumed'] = True
                     session_state['direct_api_disabled'] = True
                     session_state['direct_api_fallbacks'] = (
                         int(session_state.get('direct_api_fallbacks', 0)) + 1
                     )
+                    count, opened = register_shared_failure(
+                        connection_circuit,
+                        'direct_contract_failures',
+                        'direct_event',
+                        case_no,
+                        MAX_DIRECT_CONTRACT_FAILURES,
+                    )
+                    if opened:
+                        print(
+                            '  🛡 서로 다른 사건 '
+                            f'{count}건에서 API 계약 오류 감지 — '
+                            '전체 워커를 화면 조회 방식으로 전환합니다.'
+                        )
                     continue
                 # 아직 API 호출 전인 미지원 유형이면 현재 캡차를 그대로
                 # 기존 화면 제출에 사용한다.
@@ -1281,10 +1488,30 @@ async def search_one(
                     continue
                 print("  결과 화면 로딩 실패 — 검색 응답을 확인할 수 없음")
                 await save_result_debug(page, case_no)
+                await save_contract_debug(
+                    page,
+                    case_no,
+                    'RESULT_PAGE_UNRECOGNIZED',
+                    {
+                        'errors': ['known_result_labels_not_found'],
+                        'expected_labels': ['사건명', '재판부', '접수일'],
+                    },
+                )
+                count, opened = register_shared_failure(
+                    connection_circuit,
+                    'structure_failures',
+                    'structure_event',
+                    case_no,
+                    MAX_GLOBAL_STRUCTURE_FAILURES,
+                )
                 session_state['form_ready'] = False
                 return {h: '' for h in OUTPUT_HEADERS} | {
                     '법원': court, '사건번호': case_no,
-                    '사건명': '조회실패: 결과 화면 미확인',
+                    '사건명': (
+                        '조회실패: 결과 화면 구조변경 감지'
+                        if opened
+                        else '조회실패: 결과 화면 미확인'
+                    ),
                     '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
                 }
 
@@ -1305,12 +1532,68 @@ async def search_one(
             result = await parse_result(page, court, case_no)
             if not result.get('사건명'):
                 await save_result_debug(page, case_no)
-                result['사건명'] = '조회실패: 결과 파싱 실패'
-                print("  결과 화면은 열렸지만 사건명 추출에 실패")
+                await save_contract_debug(
+                    page,
+                    case_no,
+                    'RESULT_CHANGED',
+                    {
+                        'errors': ['case_name_not_found_in_result_tables'],
+                        'table_schema': 'semantic-label-parser-v1',
+                    },
+                )
+                count, opened = register_shared_failure(
+                    connection_circuit,
+                    'structure_failures',
+                    'structure_event',
+                    case_no,
+                    MAX_GLOBAL_STRUCTURE_FAILURES,
+                )
+                result['사건명'] = '조회실패: 결과 화면 구조변경 감지'
+                print("  🧩 결과 화면은 열렸지만 사건명 구조가 변경되었습니다.")
+                if opened:
+                    print(
+                        f'  ⛔ 서로 다른 사건 {count}건에서 결과 구조변경 감지 — '
+                        '남은 사건 조회를 안전하게 중단합니다.'
+                    )
             else:
                 print(f"  ✅ 결과 파싱 완료: 사건명={result['사건명']}")
             return await finish(result, result_page=True)
 
+        except SiteContractChanged as error:
+            page_ready = False
+            session_state['form_ready'] = False
+            classification = error.classification
+            label = (
+                '입력 화면 구조변경'
+                if classification == 'FORM_CHANGED'
+                else '캡차 구조변경'
+            )
+            await save_contract_debug(
+                page,
+                case_no,
+                classification,
+                {
+                    'missing_form': error.report.get('missingForm') or [],
+                    'missing_captcha': error.report.get('missingCaptcha') or [],
+                    'resolved': error.report.get('resolved') or {},
+                },
+            )
+            count, opened = register_shared_failure(
+                connection_circuit,
+                'structure_failures',
+                'structure_event',
+                case_no,
+                MAX_GLOBAL_STRUCTURE_FAILURES,
+            )
+            print(f'  🧩 법원 사이트 {label} 감지 ({count}건)')
+            if opened:
+                print('  ⛔ 구조변경 차단기 작동 — 남은 사건 조회를 중단합니다.')
+            return {h: '' for h in OUTPUT_HEADERS} | {
+                '법원': court,
+                '사건번호': case_no,
+                '사건명': f'조회실패: 법원 사이트 {label} 감지',
+                '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            }
         except ValueError as e:
             print(f"  입력 오류: {e}")
             break
@@ -1581,6 +1864,10 @@ async def main():
         ),
         'event': asyncio.Event(),
         'diagnosed': False,
+        'direct_contract_failures': set(),
+        'direct_event': asyncio.Event(),
+        'structure_failures': set(),
+        'structure_event': asyncio.Event(),
     }
     adaptive_state = {
         'enabled': max_worker_count > worker_count and not rescue_enabled,
@@ -1700,7 +1987,10 @@ async def main():
             while True:
                 idx = await immediate_retry_queue.get()
                 try:
-                    if connection_circuit['event'].is_set():
+                    if (
+                        connection_circuit['event'].is_set()
+                        or connection_circuit['structure_event'].is_set()
+                    ):
                         retried_indices.add(idx)
                         continue
                     case = cases[idx]
@@ -1739,7 +2029,10 @@ async def main():
 
             async def worker(worker_id, page):
                 while True:
-                    if connection_circuit['event'].is_set():
+                    if (
+                        connection_circuit['event'].is_set()
+                        or connection_circuit['structure_event'].is_set()
+                    ):
                         return
                     if worker_id >= worker_count and adaptive_state['extra_worker_retired']:
                         return
@@ -1868,10 +2161,32 @@ async def main():
                 f"열지 못해 남은 {deferred}건을 조회보류로 저장합니다."
             )
 
+        if connection_circuit['structure_event'].is_set():
+            deferred = 0
+            for idx, data in enumerate(results):
+                if data:
+                    continue
+                deferred += 1
+                results[idx] = {h: '' for h in OUTPUT_HEADERS} | {
+                    '법원': cases[idx]['court'],
+                    '사건번호': cases[idx]['case_no'],
+                    '사건명': '조회보류: 법원 사이트 구조변경 감지',
+                    '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                }
+            await partial_publisher.publish_ready()
+            print(
+                f"\n⛔ 서로 다른 사건 {MAX_GLOBAL_STRUCTURE_FAILURES}건에서 "
+                f"구조변경이 확인되어 남은 {deferred}건을 조회보류로 저장합니다."
+            )
+
         # 1차 조회에서 접속 장애·캡차 오류 등으로 실패한 사건만 마지막에
         # 한 번 더 시도한다. 성공한 행은 그대로 보존하고, 재시도 결과가
         # 실패해도 최신 실패 사유를 결과 파일에 남긴다.
-        if not prepare_only and not connection_circuit['event'].is_set():
+        if (
+            not prepare_only
+            and not connection_circuit['event'].is_set()
+            and not connection_circuit['structure_event'].is_set()
+        ):
             failed = [
                 idx for idx, data in enumerate(results)
                 if str(data.get('사건명', '')).startswith('조회실패')
@@ -1903,6 +2218,18 @@ async def main():
             'direct_api_fallbacks': sum(
                 int(state.get('direct_api_fallbacks', 0))
                 for state in session_states
+            ),
+            'direct_api_circuit_open': connection_circuit[
+                'direct_event'
+            ].is_set(),
+            'direct_api_contract_failures': len(
+                connection_circuit['direct_contract_failures']
+            ),
+            'structure_circuit_open': connection_circuit[
+                'structure_event'
+            ].is_set(),
+            'structure_failures': len(
+                connection_circuit['structure_failures']
             ),
             'immediate_retries': len(retried_indices),
             'elapsed_seconds_before_output': round(

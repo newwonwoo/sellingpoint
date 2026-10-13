@@ -42,6 +42,14 @@ const STATUS_MESSAGE = {
   queued: "실행 대기열에 등록되었습니다. 조회 작업이 시작되기를 기다리고 있습니다.",
   in_progress: "법원 선택 → 사건번호 입력 → 캡차 처리 → 결과 표 파싱을 진행하고 있습니다.",
 };
+const HEALTH_VIEW = {
+  loading: { label: "점검 상태 확인 중", className: "checking", icon: "…" },
+  checking: { label: "정기 구조 점검 중", className: "checking", icon: "↻" },
+  healthy: { label: "법원 사이트 구조 정상", className: "healthy", icon: "✓" },
+  structure_changed: { label: "법원 사이트 구조변경 감지", className: "changed", icon: "!" },
+  unavailable: { label: "법원 사이트 접속 상태 불안정", className: "unavailable", icon: "!" },
+  unknown: { label: "최근 구조 점검 결과 없음", className: "unknown", icon: "?" },
+};
 
 const SINGLE_FIELDS = [
   ["사건번호", "사건번호"],
@@ -136,12 +144,12 @@ function DiagnosticFlow({ runStatus, mode, singleOutcome }) {
   const lookupBlocked = runStatus?.status === "completed" && hasDiagnostic && !lookupAttempted;
   const resultDone = runStatus?.status === "completed" && (mode === "batch" || Boolean(singleOutcome));
   const diagnosticText = diagnostic === "success"
-    ? "연결 진단 통과"
+    ? "통신·구조 진단 통과"
     : diagnostic === "failure"
-      ? "연결 실패 · 새 환경 확인"
+      ? "진단 실패 · 원인 분류 완료"
       : diagnostic === "in_progress"
-        ? "연결 진단 중"
-        : "연결 진단 대기";
+        ? "통신·화면 구조 진단 중"
+        : "통신·구조 진단 대기";
   return (
     <div className="cs-diagnostic-flow" aria-label={mode === "batch" ? "일괄조회 진행 단계" : "단건 조회 진행 단계"}>
       <div className={`cs-flow-item ${diagnostic}`}><strong>1</strong><span>{diagnosticText}</span></div>
@@ -215,6 +223,26 @@ export default function CourtSearchTab() {
   const [expectedTotal, setExpectedTotal] = useState(0);
   const [downloadingResult, setDownloadingResult] = useState(false);
   const [error, setError] = useState("");
+  const [siteHealth, setSiteHealth] = useState({ status: "loading" });
+
+  useEffect(() => {
+    const controller = new AbortController();
+    fetch("/api/court-search-health", { signal: controller.signal })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || "구조 점검 상태 조회 실패");
+        setSiteHealth(data);
+      })
+      .catch((healthError) => {
+        if (healthError.name !== "AbortError") {
+          setSiteHealth({
+            status: "unknown",
+            message: "정기 구조 점검 상태를 불러오지 못했습니다.",
+          });
+        }
+      });
+    return () => controller.abort();
+  }, []);
 
   const downloadResult = useCallback(async (runId, scope = "all") => {
     if (!runId) return false;
@@ -463,6 +491,7 @@ export default function CourtSearchTab() {
       : "조회 실행이 종료되었습니다. 완료된 결과는 아래 버튼에서 한 파일로 받을 수 있습니다.")
     )
     : runStatus?.stageMessage || runStatus?.message || STATUS_MESSAGE[runStatus?.status] || "";
+  const healthView = HEALTH_VIEW[siteHealth.status] || HEALTH_VIEW.unknown;
 
   return (
     <div className="court-search-tab">
@@ -470,6 +499,20 @@ export default function CourtSearchTab() {
       <div className="cs-mode-tabs" role="tablist" aria-label="조회 방식">
         <button className={mode === "single" ? "on" : ""} onClick={() => setMode("single")} role="tab" aria-selected={mode === "single"}>단일 사건 조회</button>
         <button className={mode === "batch" ? "on" : ""} onClick={() => setMode("batch")} role="tab" aria-selected={mode === "batch"}>엑셀 일괄조회</button>
+      </div>
+
+      <div className={`cs-health-banner ${healthView.className}`} role="status">
+        <span className="cs-health-icon" aria-hidden="true">{healthView.icon}</span>
+        <div>
+          <strong>{healthView.label}</strong>
+          <span>{siteHealth.message || "매일 통신·화면·API 구조를 자동 점검합니다."}</span>
+        </div>
+        {siteHealth.checkedAt ? (
+          <time dateTime={siteHealth.checkedAt}>
+            최근 점검 {new Date(siteHealth.checkedAt).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}
+          </time>
+        ) : null}
+        {siteHealth.runUrl ? <a href={siteHealth.runUrl} target="_blank" rel="noreferrer">점검 로그 →</a> : null}
       </div>
 
       {mode === "single" ? (
@@ -483,9 +526,9 @@ export default function CourtSearchTab() {
           <div className="cs-upload-row cs-single-actions">
             <button className="go cs-diagnostic-start" onClick={handleSingleRun} disabled={uploading || isRunning}>
               <span className="cs-diagnostic-icon" aria-hidden="true">⌁</span>
-              <span>{uploading ? "진단 실행 등록 중…" : isRunning ? "연결 진단·조회 진행 중…" : "연결 진단 후 조회 시작"}</span>
+              <span>{uploading ? "진단 실행 등록 중…" : isRunning ? "통신·구조 진단·조회 진행 중…" : "통신·구조 진단 후 조회 시작"}</span>
             </button>
-            <span className="cs-hint">현재 실행환경에서 법원 사이트 연결을 먼저 확인하고, 통과한 경우에만 같은 환경에서 사건을 조회합니다.</span>
+            <span className="cs-hint">통신과 입력 화면·캡차 구조를 먼저 확인하고, 정상인 경우에만 같은 환경에서 사건을 조회합니다.</span>
           </div>
         </section>
       ) : (
@@ -499,9 +542,9 @@ export default function CourtSearchTab() {
             <div className="cs-upload-row">
               <input ref={fileRef} type="file" accept=".xlsx" style={{ display: "none" }} onChange={handleFileChange} />
               <button className="cs-upload-btn" onClick={() => fileRef.current?.click()} disabled={uploading || isRunning}>{file ? `📄 ${file.name}` : "파일 선택"}</button>
-              <button className="go cs-batch-diagnostic-start" onClick={() => startWithFile(file)} disabled={!file || uploading || isRunning}>{uploading ? "진단 실행 등록 중…" : isRunning ? "연결 진단·조회 진행 중…" : "연결 진단 후 조회 시작"}</button>
+              <button className="go cs-batch-diagnostic-start" onClick={() => startWithFile(file)} disabled={!file || uploading || isRunning}>{uploading ? "진단 실행 등록 중…" : isRunning ? "통신·구조 진단·조회 진행 중…" : "통신·구조 진단 후 조회 시작"}</button>
             </div>
-            <p className="cs-hint">조회 러너마다 법원 사이트 연결을 1회 먼저 확인하고, 통과한 경우에만 최대 4개 워커를 실행합니다.</p>
+            <p className="cs-hint">조회 전에 통신과 화면 구조를 확인합니다. API 변경 시 화면 조회로 자동 전환하고, 두 방식 모두 바뀌면 완료 건을 보존한 채 중단합니다.</p>
           </section>
         </>
       )}
@@ -575,6 +618,18 @@ export default function CourtSearchTab() {
         .cs-mode-tabs { display:flex; gap:8px; margin:0 0 14px; }
         .cs-mode-tabs button { padding:8px 14px; border:1px solid #cbd5e1; border-radius:7px; background:#fff; cursor:pointer; color:#475569; }
         .cs-mode-tabs button.on { background:#1F4E79; color:#fff; border-color:#1F4E79; }
+        .cs-health-banner { display:grid; grid-template-columns:auto minmax(0,1fr) auto auto; align-items:center; gap:10px; margin:0 0 14px; padding:10px 12px; border:1px solid #dbe5ef; border-radius:9px; background:#f8fafc; font-size:12px; }
+        .cs-health-banner > div { display:grid; gap:2px; }
+        .cs-health-banner strong { color:#1f2937; font-size:13px; }
+        .cs-health-banner span, .cs-health-banner time { color:#64748b; }
+        .cs-health-banner a { color:#2563eb; white-space:nowrap; }
+        .cs-health-icon { display:inline-flex; align-items:center; justify-content:center; width:24px; height:24px; border-radius:50%; font-weight:800; background:#e2e8f0; color:#475569 !important; }
+        .cs-health-banner.healthy { border-color:#a7f3d0; background:#ecfdf5; }
+        .cs-health-banner.healthy .cs-health-icon { background:#059669; color:#fff !important; }
+        .cs-health-banner.changed { border-color:#fecaca; background:#fef2f2; }
+        .cs-health-banner.changed .cs-health-icon { background:#dc2626; color:#fff !important; }
+        .cs-health-banner.unavailable { border-color:#fde68a; background:#fffbeb; }
+        .cs-health-banner.unavailable .cs-health-icon { background:#d97706; color:#fff !important; }
         .cs-step { display:flex; align-items:center; gap:8px; margin-bottom:10px; flex-wrap:wrap; }
         .cs-badge { display:inline-flex; align-items:center; justify-content:center; width:22px; height:22px; border-radius:50%; background:#1F4E79; color:#fff; font-size:12px; font-weight:bold; flex-shrink:0; }
         .cs-label { font-weight:600; font-size:14px; }
@@ -631,7 +686,7 @@ export default function CourtSearchTab() {
         .cs-result-table th { background:#f3f4f6; font-weight:600; white-space:nowrap; }
         .cs-long-cell { min-width:260px; }
         .cs-empty-cell { text-align:center !important; color:#64748b; }
-        @media (max-width:700px) { .cs-single-grid, .cs-basic-grid { grid-template-columns:1fr; } .cs-basic-cell { grid-template-columns:100px minmax(0,1fr); } .cs-diagnostic-flow { grid-template-columns:1fr; gap:6px; } .cs-flow-line { width:2px; height:10px; justify-self:center; } }
+        @media (max-width:700px) { .cs-single-grid, .cs-basic-grid { grid-template-columns:1fr; } .cs-basic-cell { grid-template-columns:100px minmax(0,1fr); } .cs-health-banner { grid-template-columns:auto minmax(0,1fr); } .cs-health-banner time, .cs-health-banner a { grid-column:2; } .cs-diagnostic-flow { grid-template-columns:1fr; gap:6px; } .cs-flow-line { width:2px; height:10px; justify-self:center; } }
       `}</style>
     </div>
   );

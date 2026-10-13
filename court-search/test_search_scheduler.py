@@ -77,5 +77,33 @@ class ConnectionCircuitTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(circuit['event'].is_set())
 
 
+class StructureCircuitTests(unittest.TestCase):
+    def test_same_case_does_not_open_structure_circuit_twice(self):
+        circuit = {}
+        SEARCH.register_shared_failure(
+            circuit, 'failures', 'event', '2026타인3944', 2
+        )
+        count, opened = SEARCH.register_shared_failure(
+            circuit, 'failures', 'event', '2026타인3944', 2
+        )
+
+        self.assertEqual(count, 1)
+        self.assertFalse(opened)
+        self.assertFalse(circuit['event'].is_set())
+
+    def test_two_distinct_cases_open_structure_circuit(self):
+        circuit = {}
+        SEARCH.register_shared_failure(
+            circuit, 'failures', 'event', '2026타인3944', 2
+        )
+        count, opened = SEARCH.register_shared_failure(
+            circuit, 'failures', 'event', '2026타인3273', 2
+        )
+
+        self.assertEqual(count, 2)
+        self.assertTrue(opened)
+        self.assertTrue(circuit['event'].is_set())
+
+
 if __name__ == '__main__':
     unittest.main()
