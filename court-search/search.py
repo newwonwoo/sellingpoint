@@ -588,9 +588,9 @@ def parse_direct_api_result(
             progress_result = "위의 '확인' 항목 체크"
         data[f'진행_{slot}결과'] = progress_result
         notice = row.get('pntcImg')
-        data[f'진행_{slot}공시문'] = (
-            str(notice) if notice not in (None, '', 'N', 'Y', 0, 1) else ''
-        )
+        # API는 화면용 아이콘 경로를 내려준다. 내부 경로를
+        # 엑셀과 웹에 노출하지 말고 공시문 존재 여부만 표시한다.
+        data[f'진행_{slot}공시문'] = '있음' if notice not in (None, '', 'N', 0) else ''
     return data
 
 
@@ -726,11 +726,13 @@ async def direct_api_result(
         'etc2': '',
         'etc3': '',
     }
-    print(
-        f'  🔎 JSON 요청 코드: court={court_code}, year={year}, '
-        f'type={case_type_code}, serial={serial}, task={task_code}; '
-        f'bindings={json.dumps({"court": court_diagnostic, "type": type_diagnostic}, ensure_ascii=False)}'
-    )
+    print('  단계 결과 데이터 조회')
+    if env_enabled('COURT_TRACE_NETWORK'):
+        print(
+            f'  🔬 JSON 요청 코드: court={court_code}, year={year}, '
+            f'type={case_type_code}, serial={serial}, task={task_code}; '
+            f'bindings={json.dumps({"court": court_diagnostic, "type": type_diagnostic}, ensure_ascii=False)}'
+        )
     base_url = f'/ssgo/ssgo{api_path}'
     basic_response = await post_court_json(
         page,
@@ -744,10 +746,7 @@ async def direct_api_result(
     error_message = str(errors.get('errorMessage') or '')
     combined_message = f'{message} {error_message}'
     if '캡챠' in combined_message or '방지문자' in combined_message:
-        print(
-            f'  캡차 불일치 → JSON 직접조회 재시도 '
-            f'(HTTP {http_status}, {combined_message[:100]})'
-        )
+        print('  캡차 불일치 → 새 문자로 재시도')
         return 'captcha_mismatch', None
     if http_status != 200 or int(payload.get('status') or 0) != 200:
         print(
@@ -784,7 +783,7 @@ async def direct_api_result(
     result = parse_direct_api_result(
         payload, progress_payload, court, case_no
     )
-    print(f"  ⚡ JSON 직접조회 완료: 사건명={result['사건명']}")
+    print(f"  ✅ 조회 완료: 사건명={result['사건명']}")
     return 'success', result
 
 
@@ -802,7 +801,6 @@ async def result_tables(page: Page) -> list[dict]:
                   rows: Array.from(table.querySelectorAll('tr')).map(row =>
                     Array.from(row.querySelectorAll(':scope > th, :scope > td'))
                       .map(cell => (cell.innerText || '').replace(/\\s+/g, ' ').trim())
-                      .filter(Boolean)
                   ).filter(row => row.length)
                 })).filter(table => table.rows.length)
             """)
