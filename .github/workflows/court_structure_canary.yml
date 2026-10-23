@@ -87,7 +87,9 @@ jobs:
         continue-on-error: true
         run: >-
           "$COURT_PYTHON" -u court-search/connection_probe.py
-          --timeout 8
+          --timeout 12
+          --attempts 3
+          --retry-delay 5
           --browser-timeout 30
           --artifacts-dir court-search/health/debug/connection
           --output court-search/health/connection.json
@@ -117,71 +119,9 @@ jobs:
         if: always()
         env:
           DIAGNOSIS_OUTCOME: ${{ steps.diagnosis.outcome }}
-          DIAGNOSIS_CLASSIFICATION: ${{ steps.diagnosis.outputs.classification }}
-          DIAGNOSIS_MESSAGE: ${{ steps.diagnosis.outputs.message }}
-          CONTRACT_FINGERPRINT: ${{ steps.diagnosis.outputs.fingerprint }}
           LOOKUP_OUTCOME: ${{ steps.lookup.outcome }}
           RUN_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
-        run: |
-          "$COURT_PYTHON" - <<'PY'
-          import json
-          import os
-          from datetime import datetime, timezone
-          from pathlib import Path
-
-          diagnosis = os.environ.get('DIAGNOSIS_OUTCOME', '')
-          classification = os.environ.get('DIAGNOSIS_CLASSIFICATION', '')
-          lookup = os.environ.get('LOOKUP_OUTCOME', '')
-          result_path = Path('court-search/health/canary-result.json')
-          row = {}
-          if result_path.exists():
-              rows = json.loads(result_path.read_text(encoding='utf-8')).get('results', [])
-              row = rows[0] if rows else {}
-          name = str(row.get('사건명') or '')
-          valid_result = (
-              row.get('사건번호') == '2026타인3944'
-              and '부동산인도명령' in name
-              and not name.startswith(('조회실패', '조회보류'))
-          )
-
-          if diagnosis != 'success':
-              status = 'structure_changed' if classification in {
-                  'FORM_CHANGED', 'CAPTCHA_CHANGED'
-              } else 'unavailable'
-          elif lookup != 'success' or not valid_result:
-              status = 'structure_changed'
-              classification = 'API_OR_RESULT_CHANGED'
-          else:
-              status = 'healthy'
-              classification = 'HEALTHY'
-
-          if status == 'healthy':
-              message = '법원 사이트 통신·화면·API 구조 정상'
-          elif classification == 'API_OR_RESULT_CHANGED':
-              message = '법원 사이트 API 또는 결과 구조변경 감지'
-          else:
-              message = os.environ.get('DIAGNOSIS_MESSAGE') or (
-                  '법원 사이트 접속 또는 구조 점검 실패'
-              )
-
-          report = {
-              'status': status,
-              'classification': classification or 'UNKNOWN',
-              'message': message,
-              'checkedAt': datetime.now(timezone.utc).isoformat(timespec='seconds'),
-              'fingerprint': os.environ.get('CONTRACT_FINGERPRINT', ''),
-              'runUrl': os.environ.get('RUN_URL', ''),
-              'canary': {
-                  'court': '서울남부지방법원',
-                  'caseNo': '2026타인3944',
-                  'caseNameMatched': valid_result,
-              },
-          }
-          Path('court-search/health/health-report.json').write_text(
-              json.dumps(report, ensure_ascii=False, indent=2), encoding='utf-8'
-          )
-          print(json.dumps(report, ensure_ascii=False))
-          PY
+        run: '"$COURT_PYTHON" -u court-search/health_report.py'
 
       - name: 구조 점검자료 보관
         if: always()
