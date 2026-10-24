@@ -124,6 +124,69 @@ class RetryTests(unittest.TestCase):
         self.assertEqual(report['attempt_count'], 1)
         self.sleep.assert_not_called()
 
+    def test_transport_retry_after_with_incomplete_browser_page(self):
+        response, ok = transport(False, 503)
+        response['http']['retry_after'] = '120'
+        self.transport.side_effect = lambda *args, **kwargs: (
+            {**response, 'http': dict(response['http'])}, ok
+        )
+        self.browser.return_value = ({
+            'classification': 'PAGE_UNAVAILABLE',
+            'page_loaded': True, 'http_status': 200,
+        }, False)
+
+        report = diagnose('https://court.example/', 12, 30, attempts=3)
+
+        self.assertEqual(report['classification'], 'PAGE_UNAVAILABLE')
+        self.assertEqual(report['attempt_count'], 1)
+        self.assertFalse(report['retryable'])
+        self.assertEqual(report['retry_suppressed'], 'server_retry_after')
+        self.assertEqual(report['attempts'][0]['http']['retry_after'], '120')
+        self.transport.assert_called_once()
+        self.browser.assert_called_once()
+        self.sleep.assert_not_called()
+
+    def test_transport_retry_after_with_browser_connection_error(self):
+        response, ok = transport(False, 503)
+        response['http']['retry_after'] = '120'
+        self.transport.side_effect = lambda *args, **kwargs: (
+            {**response, 'http': dict(response['http'])}, ok
+        )
+        self.browser.return_value = ({
+            'classification': 'BROWSER_CONNECTION_ERROR',
+            'page_loaded': False, 'error': 'net::ERR_CONNECTION_RESET',
+        }, False)
+
+        report = diagnose('https://court.example/', 12, 30, attempts=3)
+
+        self.assertEqual(report['classification'], 'SERVER_ERROR')
+        self.assertEqual(report['attempt_count'], 1)
+        self.assertFalse(report['retryable'])
+        self.assertEqual(report['retry_suppressed'], 'server_retry_after')
+        self.transport.assert_called_once()
+        self.browser.assert_called_once()
+        self.sleep.assert_not_called()
+
+    def test_server_errors_without_retry_after_keep_bounded_backoff(self):
+        self.transport.side_effect = [
+            transport(False, 503), transport(False, 503), transport(True, 200),
+        ]
+        self.browser.side_effect = [
+            ({'classification': 'PAGE_UNAVAILABLE', 'http_status': 200}, False),
+            ({'classification': 'SERVER_ERROR', 'http_status': 503}, False),
+            ({'classification': 'HEALTHY', 'http_status': 200}, True),
+        ]
+
+        report = diagnose('https://court.example/', 12, 30, attempts=3)
+
+        self.assertTrue(report['success'])
+        self.assertEqual(report['classification'], 'HEALTHY')
+        self.assertEqual(report['attempt_count'], 3)
+        self.assertEqual([c.args[0] for c in self.sleep.call_args_list], [5, 10])
+        self.assertEqual(self.transport.call_count, 3)
+        self.assertEqual(self.browser.call_count, 3)
+        self.assertTrue(all('retry_suppressed' not in item for item in report['attempts']))
+
 
 class TransportEvidenceTests(unittest.TestCase):
     @patch('connection_probe.http.client.HTTPSConnection')

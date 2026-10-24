@@ -470,8 +470,9 @@ def diagnose(url: str, timeout: float, browser_timeout: float,
         ), None)
         report["retryable"] = report["classification"] in RETRYABLE_CLASSIFICATIONS
         retry_after = browser_report.get("retry_after") or report.get("http", {}).get("retry_after")
-        if retry_after and report["classification"] == "SERVER_ERROR":
-            # 서버가 지정한 대기시간을 짧은 재시도로 무시하지 않는다.
+        if retry_after and report["retryable"]:
+            # 어느 진단 응답에서든 받은 대기 지시를 최종 오류 분류와
+            # 독립적으로 존중한다. 이번 실행의 짧은 재시도는 중단한다.
             report["retryable"] = False
             report["retry_suppressed"] = "server_retry_after"
         history.append(dict(report, attempt=attempt))
