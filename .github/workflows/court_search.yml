@@ -20,6 +20,11 @@ on:
         type: boolean
         required: false
         default: false
+      fail_closed:
+        description: 'CAPTCHA 또는 접근 차단 시 즉시 안전정지 (복구 필수)'
+        type: boolean
+        required: false
+        default: true
       expected_sha:
         description: '복구 실행 시 승인된 수정 브랜치의 전체 commit SHA'
         type: string
@@ -51,6 +56,7 @@ permissions:
   actions: write
 
 env:
+  COURT_FAIL_CLOSED: ${{ inputs.resume_40456047554 && inputs.fail_closed }}
   COURT_QUERY_INPUT: court-search/${{ inputs.input_file }}
   COURT_QUERY_OUTPUT: court-search/output.xlsx
   COURT_FINAL_OUTPUT: court-search/output.xlsx
@@ -72,6 +78,7 @@ jobs:
 
       - name: 승인 SHA 및 복구 옵션 확인
         env:
+          FAIL_CLOSED: ${{ inputs.fail_closed }}
           RESUME: ${{ inputs.resume_40456047554 }}
           EXPECTED_SHA: ${{ inputs.expected_sha }}
           INPUT_FILE: ${{ inputs.input_file }}
@@ -83,6 +90,7 @@ jobs:
             test "$GITHUB_SHA" = "$EXPECTED_SHA"
             test "$INPUT_FILE" = "input.xlsx"
             test "$PREPARE_ONLY" = "false"
+            test "$FAIL_CLOSED" = "true"
           fi
 
       - name: Python 설정
@@ -105,6 +113,7 @@ jobs:
         id: count
         env:
           INPUT_FILE: ${{ inputs.input_file }}
+          FAIL_CLOSED: ${{ inputs.fail_closed }}
           RESUME: ${{ inputs.resume_40456047554 }}
         run: |
           if [ "$RESUME" = "true" ]; then
@@ -129,6 +138,7 @@ jobs:
 
       - name: 승인 SHA 및 복구 옵션 확인
         env:
+          FAIL_CLOSED: ${{ inputs.fail_closed }}
           RESUME: ${{ inputs.resume_40456047554 }}
           EXPECTED_SHA: ${{ inputs.expected_sha }}
           INPUT_FILE: ${{ inputs.input_file }}
@@ -140,6 +150,7 @@ jobs:
             test "$GITHUB_SHA" = "$EXPECTED_SHA"
             test "$INPUT_FILE" = "input.xlsx"
             test "$PREPARE_ONLY" = "false"
+            test "$FAIL_CLOSED" = "true"
           fi
 
       - name: 고속 조회환경 불러오기
@@ -225,7 +236,7 @@ jobs:
         uses: ./court-search/artifact-uploader
 
       - name: 누적 캡차 모델 불러오기
-        if: ${{ inputs.prepare_only == true || steps.court_connection.outcome == 'success' }}
+        if: ${{ env.COURT_FAIL_CLOSED != 'true' && (inputs.prepare_only == true || steps.court_connection.outcome == 'success' ) }}
         uses: actions/cache/restore@v4
         with:
           path: court-search/captcha-model
@@ -341,14 +352,14 @@ jobs:
           retention-days: 3
 
       - name: 통과 캡차 학습 후보 확정
-        if: ${{ steps.inspect.outputs.global_connection_failure != 'true' }}
+        if: ${{ env.COURT_FAIL_CLOSED != 'true' && (steps.inspect.outputs.global_connection_failure != 'true' ) }}
         run: |
           mkdir -p court-search/captcha-success/images
           touch court-search/captcha-success/labels.jsonl
           echo "통과 확인 샘플: $(wc -l < court-search/captcha-success/labels.jsonl)건"
 
       - name: 기존 실행 학습자료 최초 이관
-        if: ${{ steps.inspect.outputs.global_connection_failure != 'true' && inputs.captcha_seed_run_id != '' }}
+        if: ${{ env.COURT_FAIL_CLOSED != 'true' && (steps.inspect.outputs.global_connection_failure != 'true' && inputs.captcha_seed_run_id != '' ) }}
         env:
           GH_TOKEN: ${{ github.token }}
           SEED_RUN_ID: ${{ inputs.captcha_seed_run_id }}
@@ -362,7 +373,7 @@ jobs:
             --dir court-search/legacy-captcha
 
       - name: 공식 캡차 학습
-        if: ${{ steps.inspect.outputs.global_connection_failure != 'true' }}
+        if: ${{ env.COURT_FAIL_CLOSED != 'true' && (steps.inspect.outputs.global_connection_failure != 'true' ) }}
         env:
           SEED_RUN_ID: ${{ inputs.captcha_seed_run_id }}
         run: |
@@ -378,7 +389,7 @@ jobs:
           cat court-search/captcha-model/training-report.json
 
       - name: 누적 캡차 모델 감사자료 보관
-        if: ${{ steps.inspect.outputs.global_connection_failure != 'true' && (inputs.prepare_only == false || inputs.captcha_seed_run_id != '') }}
+        if: ${{ env.COURT_FAIL_CLOSED != 'true' && (steps.inspect.outputs.global_connection_failure != 'true' && (inputs.prepare_only == false || inputs.captcha_seed_run_id != '') ) }}
         uses: actions/upload-artifact@v4
         with:
           name: captcha-learning-model
@@ -387,7 +398,7 @@ jobs:
           retention-days: 30
 
       - name: 다음 실행용 누적 캡차 모델 저장
-        if: ${{ steps.inspect.outputs.global_connection_failure != 'true' && (inputs.prepare_only == false || inputs.captcha_seed_run_id != '') }}
+        if: ${{ env.COURT_FAIL_CLOSED != 'true' && (steps.inspect.outputs.global_connection_failure != 'true' && (inputs.prepare_only == false || inputs.captcha_seed_run_id != '') ) }}
         uses: actions/cache/save@v4
         with:
           path: court-search/captcha-model
@@ -421,6 +432,7 @@ jobs:
 
       - name: 승인 SHA 및 복구 옵션 확인
         env:
+          FAIL_CLOSED: ${{ inputs.fail_closed }}
           RESUME: ${{ inputs.resume_40456047554 }}
           EXPECTED_SHA: ${{ inputs.expected_sha }}
           INPUT_FILE: ${{ inputs.input_file }}
@@ -432,6 +444,7 @@ jobs:
             test "$GITHUB_SHA" = "$EXPECTED_SHA"
             test "$INPUT_FILE" = "input.xlsx"
             test "$PREPARE_ONLY" = "false"
+            test "$FAIL_CLOSED" = "true"
           fi
 
       - name: 고속 재조회환경 불러오기
@@ -516,7 +529,7 @@ jobs:
         uses: ./court-search/artifact-uploader
 
       - name: 누적 캡차 모델 불러오기
-        if: ${{ steps.court_connection.outcome == 'success' }}
+        if: ${{ env.COURT_FAIL_CLOSED != 'true' && (steps.court_connection.outcome == 'success' ) }}
         uses: actions/cache/restore@v4
         with:
           path: court-search/captcha-model
@@ -602,14 +615,14 @@ jobs:
           retention-days: 7
 
       - name: 재조회 통과 캡차 학습 후보 확정
-        if: ${{ steps.court_connection.outcome == 'success' }}
+        if: ${{ env.COURT_FAIL_CLOSED != 'true' && (steps.court_connection.outcome == 'success' ) }}
         run: |
           mkdir -p court-search/captcha-success/images
           touch court-search/captcha-success/labels.jsonl
           echo "새 실행기 통과 확인 샘플: $(wc -l < court-search/captcha-success/labels.jsonl)건"
 
       - name: 기존 실행 학습자료 최초 이관
-        if: ${{ steps.court_connection.outcome == 'success' && inputs.captcha_seed_run_id != '' }}
+        if: ${{ env.COURT_FAIL_CLOSED != 'true' && (steps.court_connection.outcome == 'success' && inputs.captcha_seed_run_id != '' ) }}
         env:
           GH_TOKEN: ${{ github.token }}
           SEED_RUN_ID: ${{ inputs.captcha_seed_run_id }}
@@ -623,7 +636,7 @@ jobs:
             --dir court-search/legacy-captcha
 
       - name: 공식 캡차 학습
-        if: ${{ steps.court_connection.outcome == 'success' }}
+        if: ${{ env.COURT_FAIL_CLOSED != 'true' && (steps.court_connection.outcome == 'success' ) }}
         env:
           SEED_RUN_ID: ${{ inputs.captcha_seed_run_id }}
         run: |
@@ -639,7 +652,7 @@ jobs:
           cat court-search/captcha-model/training-report.json
 
       - name: 누적 캡차 모델 감사자료 보관
-        if: ${{ steps.court_connection.outcome == 'success' }}
+        if: ${{ env.COURT_FAIL_CLOSED != 'true' && (steps.court_connection.outcome == 'success' ) }}
         uses: actions/upload-artifact@v4
         with:
           name: captcha-learning-model
@@ -648,7 +661,7 @@ jobs:
           retention-days: 30
 
       - name: 다음 실행용 누적 캡차 모델 저장
-        if: ${{ steps.court_connection.outcome == 'success' }}
+        if: ${{ env.COURT_FAIL_CLOSED != 'true' && (steps.court_connection.outcome == 'success' ) }}
         uses: actions/cache/save@v4
         with:
           path: court-search/captcha-model

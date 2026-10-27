@@ -37,8 +37,8 @@ class RecoveryWorkflowTests(unittest.TestCase):
             fake_git.write_text('#!/bin/sh\nprintf "%s\\n" "$ACTUAL_SHA"\n')
             fake_git.chmod(0o700)
             base = dict(os.environ, PATH=tmp+os.pathsep+os.environ['PATH'], ACTUAL_SHA='a'*40,
-                        GITHUB_SHA='a'*40, EXPECTED_SHA='a'*40, RESUME='true', INPUT_FILE='input.xlsx', PREPARE_ONLY='false')
-            for changes, expected in [({},0),({'EXPECTED_SHA':'b'*40},1),({'ACTUAL_SHA':'b'*40},1),
+                        GITHUB_SHA='a'*40, EXPECTED_SHA='a'*40, RESUME='true', FAIL_CLOSED='true', INPUT_FILE='input.xlsx', PREPARE_ONLY='false')
+            for changes, expected in [({},0),({'FAIL_CLOSED':'false'},1),({'EXPECTED_SHA':'b'*40},1),({'ACTUAL_SHA':'b'*40},1),
                                       ({'EXPECTED_SHA':''},1),({'PREPARE_ONLY':'true'},1),
                                       ({'INPUT_FILE':'test_input.xlsx'},1),
                                       ({'RESUME':'false','EXPECTED_SHA':'','INPUT_FILE':'test_input.xlsx','PREPARE_ONLY':'true'},0)]:

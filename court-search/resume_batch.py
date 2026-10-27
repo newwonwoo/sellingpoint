@@ -180,7 +180,9 @@ def finalize(root, remaining, target):
     require(len(queryable) == 199, 'expected 199 queryable rows')
     connection = [r for r in queryable if r['사건명'].startswith(('조회실패: 법원 사이트', '조회보류: 법원 사이트'))
                   and '구조변경' not in r['사건명']]
-    report = {'global_connection_failure': len(connection) == len(queryable),
+    security_stop = any('안전정지:' in r['사건명'] for r in queryable)
+    report = {'global_connection_failure': not security_stop and len(connection) == len(queryable),
+              'security_stop': security_stop,
               'reused': OFFSET, 'new_rows': len(new), 'queryable': len(queryable),
               'input_errors': 1, 'total': TOTAL,
               'new_failures': sum(r['사건명'].startswith(ERROR_PREFIXES) for r in new)}

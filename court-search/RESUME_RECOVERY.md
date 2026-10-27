@@ -50,3 +50,19 @@ git diff --check
 합성 개인정보 canary 회귀는 실제 primary/fallback 신규 업로드 경로가 manifest.json/final-report.json 두 파일뿐인지 검사하고, 이 JSON과 prepare/finalize stdout/stderr에 원문 party/court/case 또는 party/court 단순 SHA-256이 없는지 검증한다. private 입력 원값 유지, 안정적 row_id, 320행 원순서 및 신규199 기준도 확인한다. workflow·permissions·secret 참조는 이번 수정에서 변경하지 않았다.
 
 위와 동일한 명령으로 복구 **16 PASS**, 전체 **81 PASS(25.450초), skip 없음**, diff 검사 통과. 독립 검토자 `/root/resume_review`도 실제 diff를 읽고 복구16개를 재실행해 **16 PASS(6.149초)**를 확인했다. 로그는 `/tmp/sellingpoint-privacy-full-tests.log`, `/tmp/sellingpoint-privacy-independent.log`. 실제 외부 요청·업로드·Actions는 실행하지 않았다.
+
+## Recovery fail-closed option
+
+Recovery dispatch now requires `fail_closed=true`; the workflow sets
+`COURT_FAIL_CLOSED=true` for primary and fallback diagnostics/search. This is an
+observation-only policy: CAPTCHA (including a CAPTCHA resource request), HTTP
+401/403/429, explicit access denial, or an unverified page stops the operation.
+No CAPTCHA payload, image, solver, input, or search submission is used. Even a
+challenge-free page is `POLICY_HOLD`, not a successful query. Pending valid rows
+are held; the original invalid row and the verified 120-row seed are preserved.
+A security hold disables runner fallback even when mixed with network errors.
+Only navigation network failures retain bounded retries. Requests already sent
+before detection cannot be undone; subsequent routed requests are aborted.
+Service workers are disabled in this mode. CAPTCHA learning steps are skipped.
+All verification for this change uses synthetic mocks; actual court/Actions
+behavior remains unverified and external execution still requires approval.

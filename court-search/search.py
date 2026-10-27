@@ -1,3 +1,4 @@
+import access_policy
 """
 대법원 나의사건검색 자동조회 스크립트
 - 대상: https://ssgo.scourt.go.kr/ssgo/index.on?cortId=www (신규 WebSquare 기반)
@@ -235,6 +236,8 @@ def case_error_result(case, reason):
 async def search_case_safely(page, case, prepare_only=False, ocr_executor=None,
                              connection_circuit=None, session_state=None):
     """행 경계에서 예외를 격리하되 취소와 구조/연결 차단 정책은 유지한다."""
+    if access_policy.enabled():
+        return await search_one_fail_closed(page, case, connection_circuit, session_state)
     try:
         return await search_one(page, case['court'], case['case_no'],
                                 case['party_name'], prepare_only, ocr_executor,
@@ -252,6 +255,21 @@ async def search_case_safely(page, case, prepare_only=False, ocr_executor=None,
         return case_error_result(
             case, f"조회오류: {type(error).__name__}: {str(error)[:220]}"
         )
+
+
+async def search_one_fail_closed(page, case, connection_circuit=None, session_state=None):
+    state = connection_circuit if connection_circuit is not None else {}
+    code = await access_policy.observe(page, TARGET_URL, state)
+    if code == 'NETWORK_ERROR' and 'event' in state:
+        failed = state.setdefault('failed_sessions', set())
+        failed.add((session_state or {}).get('worker_id', id(page)))
+        if len(failed) >= state.get('required_failed_sessions', MAX_GLOBAL_CONNECTION_FAILURES):
+            state['event'].set()
+    reason = ('조회실패: 법원 사이트 네트워크 연결 실패' if code == 'NETWORK_ERROR'
+              else '조회보류: 안전정지: ' + code)
+    return {h: '' for h in OUTPUT_HEADERS} | {
+        '법원': case['court'], '사건번호': case['case_no'], '사건명': reason,
+        '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
 
 
 async def save_structure_debug_safely(page, case_no, classification, report,
@@ -875,7 +893,7 @@ async def direct_api_result(
         'etc3': '',
     }
     print('  단계 결과 데이터 조회')
-    if env_enabled('COURT_TRACE_NETWORK'):
+    if env_enabled('COURT_TRACE_NETWORK') and not access_policy.enabled():
         print(
             f'  🔬 JSON 요청 코드: court={court_code}, year={year}, '
             f'type={case_type_code}, serial={serial}, task={task_code}; '
@@ -1878,7 +1896,7 @@ async def main():
         await publisher.close()
         return
 
-    if not prepare_only:
+    if not prepare_only and not access_policy.enabled():
         seed_stats = load_success_dataset(CAPTCHA_SEED_DIR)
         print(
             f"누적 캡차 모델 적재: {seed_stats['loaded']}건"
@@ -1948,7 +1966,7 @@ async def main():
     ocr_executor = ThreadPoolExecutor(
         max_workers=1, thread_name_prefix='captcha-ocr'
     )
-    if FAST_CAPTCHA_PATH and not prepare_only:
+    if FAST_CAPTCHA_PATH and not prepare_only and not access_policy.enabled():
         print('⚡ 캡차 고속 경로 준비: 고정 문자영역 인식기를 미리 적재합니다.')
         await asyncio.get_running_loop().run_in_executor(
             ocr_executor, warmup_captcha_solver
@@ -1972,6 +1990,7 @@ async def main():
 
         async def make_page(worker_id: int):
             context = await browser.new_context(
+                service_workers='block' if access_policy.enabled() else 'allow',
                 locale='ko-KR',
                 user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             )
@@ -1981,6 +2000,10 @@ async def main():
             page._captcha_generation = 0
 
             async def handle_dialog(dialog):
+                if access_policy.enabled():
+                    access_policy.stop(connection_circuit, 'POLICY_HOLD')
+                    await dialog.dismiss()
+                    return
                 page._last_dialog_message = dialog.message
                 print(f"  워커 {worker_id} 사이트 알림: {dialog.message[:300]}")
                 await dialog.dismiss()
@@ -2004,8 +2027,9 @@ async def main():
                         + str(error).replace('\n', ' ')[:160]
                     )
 
-            page.on('response', capture_captcha_response)
-            if env_enabled('COURT_TRACE_NETWORK'):
+            if not access_policy.enabled():
+                page.on('response', capture_captcha_response)
+            if env_enabled('COURT_TRACE_NETWORK') and not access_policy.enabled():
                 trace_host = urlparse(TARGET_URL).hostname
 
                 def trace_request(request):
@@ -2252,6 +2276,7 @@ async def main():
             not prepare_only
             and not connection_circuit['event'].is_set()
             and not connection_circuit['structure_event'].is_set()
+            and not connection_circuit.get('security_reason')
         ):
             failed = [
                 idx for idx, data in enumerate(results)

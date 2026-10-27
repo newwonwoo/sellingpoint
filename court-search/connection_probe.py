@@ -442,6 +442,10 @@ def diagnose(url: str, timeout: float, browser_timeout: float,
              artifacts_dir: Path | None = None, attempts: int = 1,
              retry_delay: float = 5.0) -> dict:
     """같은 실행환경에서 제한적으로 재시도한다. 차단 응답에는 재접속하지 않는다."""
+    import access_policy
+    if access_policy.enabled():
+        import asyncio
+        return asyncio.run(access_policy.diagnostic(url, browser_timeout, attempts, retry_delay))
     history = []
     public_ip = discover_public_ip()
     for attempt in range(1, attempts + 1):
