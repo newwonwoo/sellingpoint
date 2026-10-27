@@ -1159,6 +1159,8 @@ def record_adaptive_health(state: dict, result: dict, duration: float):
     if not state['enabled']:
         return
     name = str(result.get('사건명', ''))
+    if name == '조회보류: 사건번호 형식 오류':
+        return  # 접속하지 않은 입력 오류는 사이트 상태·처리속도 표본에서 제외한다.
     connection_failure = (
         name.startswith((
             '조회실패: 법원 사이트', '조회보류: 법원 사이트'
@@ -1254,7 +1256,19 @@ async def search_one(
 ) -> dict:
     print(f"  조회: {court} / {case_no}")
 
-    year, case_type, serial = parse_case_no(case_no)
+    try:
+        year, case_type, serial = parse_case_no(case_no)
+    except ValueError:
+        # 연도 4자리 등 입력 형식이 맞지 않으면 페이지·캡차에 접근하지 않는다.
+        # 원본 행은 사유와 함께 보존하고 다음 사건으로 진행한다. '조회보류'는
+        # 즉시/마지막 재조회 대상인 '조회실패'에 포함되지 않는다.
+        print(f'  ⏭ 사건번호 형식 오류 — 조회 없이 건너뜁니다: {case_no} (연도 4자리 필수)')
+        return {h: '' for h in OUTPUT_HEADERS} | {
+            '법원': court,
+            '사건번호': case_no,
+            '사건명': '조회보류: 사건번호 형식 오류',
+            '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+        }
     page_ready = False
     stage = '사이트 접속'
     failure_reason = '재시도 한도 초과'
