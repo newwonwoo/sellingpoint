@@ -212,18 +212,19 @@ jobs:
               raise SystemExit(f'전체 결과 행 수 불일치: {actual}/{expected}')
           name_column = rows[0].index('사건명')
           failed = [row[:3] for row in rows[1:]
-                    if not row[name_column] or str(row[name_column]).startswith(('조회실패', '조회보류'))]
+                    if not row[name_column] or str(row[name_column]).startswith(('조회실패', '조회보류', '조회오류', '입력오류'))]
           connection_failures = [row for row in rows[1:]
                                  if str(row[name_column]).startswith((
                                      '조회실패: 법원 사이트',
                                      '조회보류: 법원 사이트',
                                  ))
                                  and '구조변경' not in str(row[name_column])]
-          global_connection_failure = actual > 0 and len(connection_failures) == actual
+          queryable = [row for row in rows[1:] if not str(row[name_column]).startswith('입력오류')]
+          global_connection_failure = bool(queryable) and len(connection_failures) == len(queryable)
           with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='utf-8') as output:
               print(f"global_connection_failure={'true' if global_connection_failure else 'false'}", file=output)
           if failed:
-              print(f'⚠ 실패·보류 {len(failed)}건도 사유를 포함해 결과 파일에 보관합니다: {failed}')
+              print(f'⚠ 실패·보류·입력오류 {len(failed)}건도 사유를 포함해 결과 파일에 보관합니다: {failed}')
           if global_connection_failure:
               print('⚠ 첫 실행기 전체가 법원 사이트에 연결되지 않아 새 실행기 재조회를 예약합니다.')
           print(f'✅ 전체 결과 파일 생성: {actual}건')
@@ -447,9 +448,9 @@ jobs:
               raise SystemExit(f'재조회 결과 행 수 불일치: {actual}/{expected}')
           name_column = rows[0].index('사건명')
           failed = [row[:3] for row in rows[1:]
-                    if not row[name_column] or str(row[name_column]).startswith(('조회실패', '조회보류'))]
+                    if not row[name_column] or str(row[name_column]).startswith(('조회실패', '조회보류', '조회오류', '입력오류'))]
           if failed:
-              print(f'⚠ 새 실행기에서도 실패·보류 {len(failed)}건 — 사유를 결과에 보관합니다: {failed}')
+              print(f'⚠ 새 실행기에서도 실패·보류·입력오류 {len(failed)}건 — 사유를 결과에 보관합니다: {failed}')
           print(f'✅ 새 실행기 전체 결과 파일 생성: {actual}건')
           PY
 

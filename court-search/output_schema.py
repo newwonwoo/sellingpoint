@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from pathlib import Path
 
 import openpyxl
@@ -21,6 +23,19 @@ OUTPUT_HEADERS = [
 
 
 def write_output(results: list[dict], path: str):
+    """완성된 파일만 교체하여 저장 중 오류가 기존 결과를 손상시키지 않는다."""
+    target = Path(path)
+    fd, temporary = tempfile.mkstemp(dir=target.parent, suffix=target.suffix)
+    os.close(fd)
+    try:
+        _write_output(results, temporary)
+        os.replace(temporary, target)
+    finally:
+        Path(temporary).unlink(missing_ok=True)
+    print(f"\n✅ 결과 저장: {path} ({len(results)}건)")
+
+
+def _write_output(results: list[dict], path: str):
     if Path(path).suffix.lower() == '.json':
         normalized = [
             {header: data.get(header, '') for header in OUTPUT_HEADERS}
@@ -30,7 +45,6 @@ def write_output(results: list[dict], path: str):
             json.dumps({'results': normalized}, ensure_ascii=False, indent=2),
             encoding='utf-8',
         )
-        print(f"\n✅ JSON 결과 저장: {path} ({len(results)}건)")
         return
 
     workbook = openpyxl.Workbook()
@@ -50,9 +64,12 @@ def write_output(results: list[dict], path: str):
 
     for row_number, data in enumerate(results, 2):
         for column, header in enumerate(OUTPUT_HEADERS, 1):
-            sheet.cell(
-                row=row_number, column=column, value=data.get(header, '')
-            )
+            value = data.get(header, '')
+            if isinstance(value, (dict, list)):
+                value = json.dumps(value, ensure_ascii=False)
+            cell = sheet.cell(row=row_number, column=column, value=value)
+            if isinstance(value, str):
+                cell.data_type = 's'  # 원 입력을 Excel 수식으로 실행하지 않는다.
 
     column_widths = {
         1: 20, 2: 16, 3: 24, 4: 20,
@@ -70,4 +87,4 @@ def write_output(results: list[dict], path: str):
 
     sheet.freeze_panes = 'A2'
     workbook.save(path)
-    print(f"\n✅ 결과 저장: {path} ({len(results)}건)")
+    workbook.close()

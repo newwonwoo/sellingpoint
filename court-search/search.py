@@ -32,6 +32,7 @@ from captcha_solver import (
     warmup_captcha_solver,
 )
 from output_schema import OUTPUT_HEADERS, write_output
+from case_number import parse_case_no
 from site_contract import (
     CONTRACT_VERSION,
     FORM_INSPECTION_JS,
@@ -187,10 +188,10 @@ def read_input(path: str) -> list[dict]:
         rows = []
         for index, item in enumerate(items, start=1):
             court = str(item.get('court') or '').strip()
-            case_no = str(item.get('case_no') or item.get('caseNo') or '').strip()
+            case_no = item.get('case_no', item.get('caseNo'))
             party = str(item.get('party_name') or item.get('party') or '주택').strip()
-            if not court or not case_no:
-                raise ValueError(f"JSON {index}번: court와 case_no가 필요합니다.")
+            if not court:
+                raise ValueError(f"JSON {index}번: court가 필요합니다.")
             rows.append({
                 'row': index,
                 'court': court,
@@ -209,22 +210,59 @@ def read_input(path: str) -> list[dict]:
     for i, row in enumerate(ws.iter_rows(min_row=2, values_only=True), start=2):
         court = row[headers['법원']] if headers['법원'] < len(row) else None
         case_no = row[headers['사건번호']] if headers['사건번호'] < len(row) else None
-        if not court and not case_no: continue
-        if not court or not case_no: raise ValueError(f"{i}행: 법원과 사건번호를 모두 입력해야 합니다.")
+        if all(value is None for value in row): continue
+        if not court: raise ValueError(f"{i}행: 법원과 사건번호를 모두 입력해야 합니다.")
         party = row[party_col] if party_col is not None and party_col < len(row) else None
         party = str(party).strip() if party is not None else ''
-        rows.append({'row': i, 'court': str(court).strip(), 'case_no': str(case_no).strip(),
+        rows.append({'row': i, 'court': str(court).strip(), 'case_no': case_no,
                      'party_name': party or '주택'})
+    wb.close()
     return rows
 
 
 # 사건번호 파싱: "2026타인3944" → (year, type_str, serial)
 # ──────────────────────────────────────────────
-def parse_case_no(case_no: str):
-    m = re.match(r'(\d{4})([가-힣]+)(\d+)', case_no)
-    if not m:
-        raise ValueError(f"사건번호 형식 오류: {case_no}")
-    return m.group(1), m.group(2), m.group(3)
+def case_error_result(case, reason):
+    """오류도 입력 순서와 원 사건번호를 유지하는 결과 한 행으로 남긴다."""
+    print(f"⚠ 입력 {case['row']}행 / 원 사건번호 {case['case_no']!r}: {reason}")
+    return {h: '' for h in OUTPUT_HEADERS} | {
+        '법원': case['court'], '사건번호': case['case_no'],
+        '사건명': reason,
+        '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+    }
+
+
+async def search_case_safely(page, case, prepare_only=False, ocr_executor=None,
+                             connection_circuit=None, session_state=None):
+    """행 경계에서 예외를 격리하되 취소와 구조/연결 차단 정책은 유지한다."""
+    try:
+        return await search_one(page, case['court'], case['case_no'],
+                                case['party_name'], prepare_only, ocr_executor,
+                                connection_circuit, session_state)
+    except SiteContractChanged as error:
+        # 단건 내부 처리 범위 밖에서 발생해도 구조변경 신호를 일반 오류로 숨기지 않는다.
+        if connection_circuit is not None:
+            register_shared_failure(connection_circuit, 'structure_failures',
+                                    'structure_event', case['case_no'],
+                                    MAX_GLOBAL_STRUCTURE_FAILURES)
+        if session_state is not None:
+            session_state['form_ready'] = False
+        return case_error_result(case, f'조회실패: 법원 사이트 구조변경 감지 ({error.classification})')
+    except Exception as error:
+        return case_error_result(
+            case, f"조회오류: {type(error).__name__}: {str(error)[:220]}"
+        )
+
+
+async def save_structure_debug_safely(page, case_no, classification, report,
+                                      *, include_result=False):
+    """진단 파일 저장 실패가 이미 감지한 구조변경 처리를 막지 않게 한다."""
+    try:
+        if include_result:
+            await save_result_debug(page, case_no)
+        await save_contract_debug(page, case_no, classification, report)
+    except Exception as error:
+        print(f'  ⚠ 구조변경 진단 저장 실패: {type(error).__name__}: {error}')
 
 
 class SiteContractChanged(RuntimeError):
@@ -1166,7 +1204,7 @@ def record_adaptive_health(state: dict, result: dict, duration: float):
         and '구조변경' not in name
     )
     state['samples'].append({
-        'success': bool(name) and not name.startswith(('조회실패', '조회보류')),
+        'success': bool(name) and not name.startswith(('조회실패', '조회보류', '조회오류', '입력오류')),
         'connection_failure': connection_failure,
         'duration': duration,
     })
@@ -1487,8 +1525,7 @@ async def search_one(
                     print("  캡차 불일치 → 재시도")
                     continue
                 print("  결과 화면 로딩 실패 — 검색 응답을 확인할 수 없음")
-                await save_result_debug(page, case_no)
-                await save_contract_debug(
+                await save_structure_debug_safely(
                     page,
                     case_no,
                     'RESULT_PAGE_UNRECOGNIZED',
@@ -1496,6 +1533,7 @@ async def search_one(
                         'errors': ['known_result_labels_not_found'],
                         'expected_labels': ['사건명', '재판부', '접수일'],
                     },
+                    include_result=True,
                 )
                 count, opened = register_shared_failure(
                     connection_circuit,
@@ -1531,8 +1569,7 @@ async def search_one(
             stage = '결과 파싱'
             result = await parse_result(page, court, case_no)
             if not result.get('사건명'):
-                await save_result_debug(page, case_no)
-                await save_contract_debug(
+                await save_structure_debug_safely(
                     page,
                     case_no,
                     'RESULT_CHANGED',
@@ -1540,6 +1577,7 @@ async def search_one(
                         'errors': ['case_name_not_found_in_result_tables'],
                         'table_schema': 'semantic-label-parser-v1',
                     },
+                    include_result=True,
                 )
                 count, opened = register_shared_failure(
                     connection_circuit,
@@ -1568,7 +1606,7 @@ async def search_one(
                 if classification == 'FORM_CHANGED'
                 else '캡차 구조변경'
             )
-            await save_contract_debug(
+            await save_structure_debug_safely(
                 page,
                 case_no,
                 classification,
@@ -1809,6 +1847,25 @@ async def main():
     cases = read_input(input_path)
     print(f"총 {len(cases)}건 조회 시작\n")
 
+    results = [{} for _ in cases]
+    valid_indices = []
+    for idx, case in enumerate(cases):
+        try:
+            parse_case_no(case['case_no'])
+        except ValueError as error:
+            results[idx] = case_error_result(case, f'입력오류: {error}')
+        else:
+            valid_indices.append(idx)
+    if len(valid_indices) != len(cases):
+        print(f"⚠ 사건번호 입력오류 {len(cases) - len(valid_indices)}건: "
+              "원 입력을 보존하여 오류 행으로 저장하고 나머지만 조회합니다.")
+    if not valid_indices:
+        publisher = PartialResultPublisher(results)
+        await publisher.start()
+        write_output(results, output_path)
+        await publisher.close()
+        return
+
     if not prepare_only:
         seed_stats = load_success_dataset(CAPTCHA_SEED_DIR)
         print(
@@ -1854,7 +1911,6 @@ async def main():
     else:
         print(f"조회 워커 {worker_count}개로 실행합니다.")
 
-    results = [{} for _ in cases]
     partial_publisher = PartialResultPublisher(results)
     await partial_publisher.start()
     connection_circuit = {
@@ -1999,11 +2055,9 @@ async def main():
                         end=' ',
                     )
                     try:
-                        results[idx] = await search_one(
+                        results[idx] = await search_case_safely(
                             page,
-                            case['court'],
-                            case['case_no'],
-                            case['party_name'],
+                            case,
                             prepare_only,
                             ocr_executor,
                             connection_circuit,
@@ -2048,11 +2102,9 @@ async def main():
                     print(f"[{prefix} 워커 {worker_id + 1}]", end=' ')
                     started_at = asyncio.get_running_loop().time()
                     try:
-                        results[idx] = await search_one(
+                        results[idx] = await search_case_safely(
                             page,
-                            case['court'],
-                            case['case_no'],
-                            case['party_name'],
+                            case,
                             prepare_only,
                             ocr_executor,
                             connection_circuit,
@@ -2118,7 +2170,7 @@ async def main():
                 rescue_worker(worker_count, pages[worker_count][1])
             ))
 
-        await run_batch(range(len(cases)))
+        await run_batch(valid_indices)
 
         if rescue_enabled:
             # 1차 큐가 끝난 뒤 유휴 상태가 된 세 워커도 남은 구조대 큐를

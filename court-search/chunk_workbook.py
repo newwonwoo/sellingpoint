@@ -10,6 +10,7 @@ from pathlib import Path
 
 import openpyxl
 from output_schema import OUTPUT_HEADERS, write_output
+from case_number import parse_case_no
 
 
 CHUNK_SIZE = 20
@@ -22,8 +23,14 @@ def input_rows(path: Path) -> tuple[list, list[tuple]]:
     rows = list(sheet.iter_rows(values_only=True))
     if not rows:
         raise ValueError("입력 엑셀이 비어 있습니다.")
+    workbook.close()
     header = list(rows[0])
-    data = [row for row in rows[1:] if row and row[0] and len(row) > 1 and row[1]]
+    columns = {str(value).strip(): index for index, value in enumerate(header)}
+    if '법원' not in columns or '사건번호' not in columns:
+        raise ValueError("입력 파일에 '법원', '사건번호' 열이 필요합니다.")
+    data = [row for row in rows[1:] if any(value is not None for value in row)]
+    if any(not row[columns['법원']] for row in data):
+        raise ValueError('모든 입력 행에 법원이 필요합니다.')
     return header, data
 
 
@@ -59,17 +66,24 @@ def print_count(path: Path):
 
 def write_blocked_output(source: Path, target: Path, reason: str):
     """연결 진단 실패 시 실제 조회 없이 모든 입력을 보류 결과로 남긴다."""
-    _, rows = input_rows(source)
+    header, rows = input_rows(source)
+    columns = {str(value).strip(): index for index, value in enumerate(header)}
     checked_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    results = [
-        {header: '' for header in OUTPUT_HEADERS} | {
-            '법원': str(row[0]).strip(),
-            '사건번호': str(row[1]).strip(),
-            '사건명': f'조회보류: {reason}',
+    results = []
+    for row in rows:
+        case_no = row[columns['사건번호']]
+        status = f'조회보류: {reason}'
+        try:
+            parse_case_no(case_no)
+        except ValueError as error:
+            status = f'입력오류: {error}'
+            print(f'⚠ 원 사건번호 {case_no!r}: {status}')
+        results.append({header: '' for header in OUTPUT_HEADERS} | {
+            '법원': str(row[columns['법원']]).strip(),
+            '사건번호': case_no,
+            '사건명': status,
             '조회일시': checked_at,
-        }
-        for row in rows
-    ]
+        })
     target.parent.mkdir(parents=True, exist_ok=True)
     write_output(results, str(target))
     print(f'⏹ 연결 진단 실패 결과 생성: {len(results)}건')
