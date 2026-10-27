@@ -237,7 +237,7 @@ async def search_case_safely(page, case, prepare_only=False, ocr_executor=None,
                              connection_circuit=None, session_state=None):
     """행 경계에서 예외를 격리하되 취소와 구조/연결 차단 정책은 유지한다."""
     if access_policy.enabled():
-        return await search_one_fail_closed(page, case, connection_circuit, session_state)
+        return await search_one_fail_closed(page, case, connection_circuit, session_state, prepare_only)
     try:
         return await search_one(page, case['court'], case['case_no'],
                                 case['party_name'], prepare_only, ocr_executor,
@@ -257,19 +257,76 @@ async def search_case_safely(page, case, prepare_only=False, ocr_executor=None,
         )
 
 
-async def search_one_fail_closed(page, case, connection_circuit=None, session_state=None):
+async def search_one_fail_closed(page, case, connection_circuit=None, session_state=None, prepare_only=False):
     state = connection_circuit if connection_circuit is not None else {}
-    code = await access_policy.observe(page, TARGET_URL, state)
-    if code == 'NETWORK_ERROR' and 'event' in state:
-        failed = state.setdefault('failed_sessions', set())
-        failed.add((session_state or {}).get('worker_id', id(page)))
-        if len(failed) >= state.get('required_failed_sessions', MAX_GLOBAL_CONNECTION_FAILURES):
-            state['event'].set()
-    reason = ('조회실패: 법원 사이트 네트워크 연결 실패' if code == 'NETWORK_ERROR'
-              else '조회보류: 안전정지: ' + code)
-    return {h: '' for h in OUTPUT_HEADERS} | {
-        '법원': case['court'], '사건번호': case['case_no'], '사건명': reason,
-        '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+    async with state.setdefault('policy_lock', asyncio.Lock()):
+        try:
+            code = await access_policy.navigate(page, TARGET_URL, state)
+            if code == 'NETWORK_ERROR':
+                if 'event' in state:
+                    failed = state.setdefault('failed_sessions', set())
+                    failed.add((session_state or {}).get('worker_id', id(page)))
+                    if len(failed) >= state.get('required_failed_sessions', MAX_GLOBAL_CONNECTION_FAILURES):
+                        state['event'].set()
+                reason = '조회실패: 법원 사이트 네트워크 연결 실패'
+            else:
+                state.setdefault('failed_sessions', set()).clear()
+                guarded = access_policy.Guarded(page, page, state)
+                year, case_type, serial = parse_case_no(case['case_no'])
+                await select_court(guarded, case['court'])
+                await ws_select(guarded, SEL_YEAR, year)
+                await ws_select(guarded, SEL_TYPE, CASE_TYPE_MAP.get(case_type, case_type))
+                await guarded.fill(SEL_SERIAL, serial)
+                await guarded.fill(SEL_PARTY, case['party_name'])
+                if prepare_only:
+                    return {h: '' for h in OUTPUT_HEADERS} | {
+                        '법원': case['court'], '사건번호': case['case_no'],
+                        '사건명': '입력점검 완료',
+                        '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+                # No CAPTCHA answer, refresh, direct API, image or learning path.
+                await guarded.click(SEL_SEARCH)
+                if not await wait_for_result_page(guarded, allow_no_result=True):
+                    access_policy.stop(state, 'STRUCTURE_UNKNOWN')
+                    access_policy.check(state)
+                content = await guarded.content()
+                if any(k in content for k in ['사건이 존재하지 않습니다', '조회된 사건이 없습니다', '검색결과가 없습니다']):
+                    reason = '사건없음'
+                else:
+                    result = await parse_result(guarded, case['court'], case['case_no'])
+                    await access_policy.checkpoint(page, state)
+                    if result.get('사건명'):
+                        return result
+                    access_policy.stop(state, 'STRUCTURE_UNKNOWN')
+                    access_policy.check(state)
+        except access_policy.PolicyStop as error:
+            reason = ('조회보류: 법원 사이트 구조변경 미확인' if error.code == 'STRUCTURE_UNKNOWN'
+                      else '조회보류: 안전정지: ' + error.code)
+        except Exception:
+            # Never repeat a submitted search on an unclassified action failure.
+            # A response signal always takes precedence over a structural error.
+            access_policy.stop(state, 'STRUCTURE_UNKNOWN')
+            reason = ('조회보류: 안전정지: ' + state['security_reason'] if state.get('security_reason')
+                      else '조회보류: 법원 사이트 구조변경 미확인')
+        return {h: '' for h in OUTPUT_HEADERS} | {
+            '법원': case['court'], '사건번호': case['case_no'], '사건명': reason,
+            '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+
+def preserve_late_security_stop(results, cases, state):
+    """A late response must not leave all network rows eligible for fallback."""
+    if not state.get('security_reason'):
+        return []
+    changed = []
+    for idx, data in enumerate(results):
+        name = str(data.get('사건명', ''))
+        if not data or (name.startswith(('조회실패: 법원 사이트', '조회보류: 법원 사이트'))
+                        and '구조변경' not in name):
+            results[idx] = {h: '' for h in OUTPUT_HEADERS} | {
+                '법원': cases[idx]['court'], '사건번호': cases[idx]['case_no'],
+                '사건명': '조회보류: 안전정지: ' + state['security_reason'],
+                '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+            changed.append(idx)
+    return changed
 
 
 async def save_structure_debug_safely(page, case_no, classification, report,
@@ -1167,7 +1224,7 @@ async def save_result_debug(page: Page, case_no: str):
             print(f"  결과 프레임 진단 실패: {e}")
 
 
-async def wait_for_result_page(page: Page, timeout_ms: int = 12000) -> bool:
+async def wait_for_result_page(page: Page, timeout_ms: int = 12000, *, allow_no_result=False) -> bool:
     """검색 후 비동기로 렌더링되는 기본내용 표를 기다린다."""
     deadline = asyncio.get_running_loop().time() + timeout_ms / 1000
     while asyncio.get_running_loop().time() < deadline:
@@ -1175,6 +1232,8 @@ async def wait_for_result_page(page: Page, timeout_ms: int = 12000) -> bool:
             try:
                 text = await frame.locator('body').inner_text(timeout=1000)
                 if all(label in text for label in ('사건명', '재판부', '접수일')):
+                    return True
+                if allow_no_result and any(label in text for label in ('사건이 존재하지 않습니다', '조회된 사건이 없습니다', '검색결과가 없습니다')):
                     return True
             except Exception:
                 continue
@@ -2001,7 +2060,12 @@ async def main():
 
             async def handle_dialog(dialog):
                 if access_policy.enabled():
-                    access_policy.stop(connection_circuit, 'POLICY_HOLD')
+                    message = dialog.message
+                    reason = ('CAPTCHA' if re.search(r'captcha|자동입력|방지문자|보안문자', message, re.I)
+                              else 'ACCESS_DENIED' if re.search(r'access denied|forbidden|접근.*(차단|거부|제한)|보안.*(차단|위반)', message, re.I)
+                              else None)
+                    if reason:
+                        access_policy.stop(connection_circuit, reason)
                     await dialog.dismiss()
                     return
                 page._last_dialog_message = dialog.message
@@ -2334,7 +2398,10 @@ async def main():
         await browser.close()
     ocr_executor.shutdown(wait=True)
 
+    revised = preserve_late_security_stop(results, cases, connection_circuit) if access_policy.enabled() else []
     write_output(results, output_path)
+    if revised:
+        await partial_publisher.publish_revisions(revised)
     await partial_publisher.close()
 
 

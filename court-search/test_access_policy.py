@@ -18,7 +18,7 @@ class PolicyTests(unittest.IsolatedAsyncioTestCase):
         return page
 
     async def test_security_signals_prevent_all_next_requests(self):
-        for code,status,wanted in [('CAPTCHA',200,'CAPTCHA'),('ACCESS_DENIED',200,'ACCESS_DENIED'),('POLICY_HOLD',403,'ACCESS_DENIED'),('POLICY_HOLD',429,'RATE_LIMITED')]:
+        for code,status,wanted in [('CAPTCHA',200,'CAPTCHA'),('ACCESS_DENIED',200,'ACCESS_DENIED'),('STRUCTURE_UNKNOWN',403,'ACCESS_DENIED'),('STRUCTURE_UNKNOWN',429,'RATE_LIMITED')]:
             with self.subTest(code=code,status=status):
                 page=self.page(code,status);state={}
                 self.assertEqual(await P.observe(page,'mock://court',state,3,0),wanted)
@@ -51,7 +51,7 @@ class PolicyTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(await P.observe(page,'mock://court',{},3,0),'NETWORK_ERROR')
         self.assertEqual(page.goto.await_count,3)
         page=self.page();page.evaluate.side_effect=TimeoutError('schema inspection timeout')
-        self.assertEqual(await P.observe(page,'mock://court',{},3,0),'POLICY_HOLD')
+        self.assertEqual(await P.observe(page,'mock://court',{},3,0),'STRUCTURE_UNKNOWN')
         page.goto.assert_awaited_once()
 
     async def test_cancel_propagates(self):

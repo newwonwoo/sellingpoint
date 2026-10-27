@@ -53,16 +53,29 @@ git diff --check
 
 ## Recovery fail-closed option
 
-Recovery dispatch now requires `fail_closed=true`; the workflow sets
-`COURT_FAIL_CLOSED=true` for primary and fallback diagnostics/search. This is an
-observation-only policy: CAPTCHA (including a CAPTCHA resource request), HTTP
-401/403/429, explicit access denial, or an unverified page stops the operation.
-No CAPTCHA payload, image, solver, input, or search submission is used. Even a
-challenge-free page is `POLICY_HOLD`, not a successful query. Pending valid rows
-are held; the original invalid row and the verified 120-row seed are preserved.
-A security hold disables runner fallback even when mixed with network errors.
-Only navigation network failures retain bounded retries. Requests already sent
-before detection cannot be undone; subsequent routed requests are aborted.
-Service workers are disabled in this mode. CAPTCHA learning steps are skipped.
-All verification for this change uses synthetic mocks; actual court/Actions
-behavior remains unverified and external execution still requires approval.
+Recovery dispatch requires `fail_closed=true`; the workflow sets
+`COURT_FAIL_CLOSED=true` for primary and fallback diagnostics/search. A verified
+normal input form without CAPTCHA or access denial can proceed through the
+existing court selection, field entry, submit and result parser. This path never
+calls the CAPTCHA answer, refresh, image, direct API or learning functions.
+
+The policy distinguishes `NORMAL_FORM`, explicit CAPTCHA/access denial, and
+`STRUCTURE_UNKNOWN`. HTTP 401/403/429 and CAPTCHA resource requests latch a shared
+security stop. Every async page/frame/locator operation checks before and after,
+including helper fallback inputs and progress-tab JavaScript clicks. Once a stop
+is latched, subsequent requests abort and other workers/retries cannot proceed.
+A structural inspection failure is held separately, not retried as a transport
+failure. Only navigation transport failures retain bounded retries. Existing
+result ordering, input errors, atomic output and the 120-row seed are preserved.
+Any explicit security hold prevents another-runner fallback, including a mixture
+with network errors. No workflow permissions, secrets or input paths changed.
+
+The previous `b5f1dc5` 89 PASS validated an incorrectly observation-only policy:
+even normal forms were always held. Those passes were **not** evidence of normal
+query completion. The correction adds positive synthetic form-to-result tests,
+normal no-result handling, late CAPTCHA/403/429/access-denial counterexamples,
+helper exception/fallback tests and a synthetic DOM browser test with networking
+blocked. It does not assert that the real site ever offers a CAPTCHA-free form.
+Actual court, API and Actions behavior remains unverified. Requests already sent
+before detection cannot be recalled. External execution authorization is managed
+by not executing until approved, not by suppressing valid normal code paths.
