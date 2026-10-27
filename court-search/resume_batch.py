@@ -128,7 +128,7 @@ def api(path, *, binary=False):
 
 def prepare(root, fetch=api):
     root = Path(root)
-    root.mkdir(parents=True, exist_ok=False)  # refuses stale/reused evidence directories
+    root.mkdir(mode=0o700, parents=True, exist_ok=False)  # refuses stale/reused evidence directories
     run = fetch(f'actions/runs/{SOURCE_RUN}')
     require(run['id'] == SOURCE_RUN and run['head_sha'] == SOURCE_SHA, 'source run mismatch')
     payload = fetch(f'contents/court-search/input.xlsx?ref={SOURCE_SHA}')
@@ -157,9 +157,17 @@ def prepare(root, fetch=api):
     book.save(root / 'remaining.xlsx')
     book.close()
     verify_remaining(root / 'remaining.xlsx', root)
+    # Public row references use only existing provenance and row positions.
+    # Never hash/encode party, court or case-number values into public identifiers.
+    public_rows = [
+        {'index': c['index'], 'excel_row': c['excel_row'],
+         'row_id': sha256(f"court-resume-row-v1:{SOURCE_RUN}:{SOURCE_SHA}:{INPUT_SHA256}:"
+                          f"{c['index']}:{c['excel_row']}".encode())}
+        for c in cases
+    ]
     manifest = {'source_run': SOURCE_RUN, 'source_sha': SOURCE_SHA, 'input_blob': INPUT_BLOB,
                 'input_sha256': INPUT_SHA256, 'offset': OFFSET, 'total': TOTAL,
-                'artifacts': ARTIFACTS, 'rows': cases}
+                'artifacts': ARTIFACTS, 'rows': public_rows}
     (root / 'manifest.json').write_text(json.dumps(manifest, ensure_ascii=False, indent=2), encoding='utf-8')
 
 

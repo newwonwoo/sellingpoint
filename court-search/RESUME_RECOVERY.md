@@ -42,3 +42,11 @@ git diff --check
 보존된 120결과는 재조회하지 않지만, 원 121–156번은 이전 요청 이력이 있어 유효199건 중 일부는 재조회일 수 있다. 부분 artifact 이후의 자동 재개나 이후 반복 dispatch의 영구 중복 방지는 추가하지 않았다. 취소/runner 손실/저장 장치 장애까지 최종 완성을 보장하지 않는다.
 
 과거 처리율에 따른 약8분은 동일 환경 가정의 추정이며 보장 시간/금액 상한이 아니다. 별도 GO 전에 승인된 최종 SHA, 활성 실행, 과금 스냅샷을 다시 확인해야 한다.
+
+## 후속 manifest 개인정보 최소화
+
+업로드 manifest의 행 필드는 `index`, `excel_row`, `row_id`만 남긴다. `row_id`는 기존 run/SHA/전체 입력 provenance hash와 원행 위치로 생성하며 당사자·법원·사건번호 값이나 그 단순 해시/인코딩을 사용하지 않는다. 기존 provenance와 원행에 대한 안정적인 참조이며 개인정보의 암호화나 재식별 불가능성을 주장하지 않는다. 원문 검증은 메모리와 mode0700인 런타임 임시 디렉터리의 입력에서 유지한다. 기존 최종 결과의 사건번호 보존은 그대로이며 신규 manifest로 복사하지 않는다.
+
+합성 개인정보 canary 회귀는 실제 primary/fallback 신규 업로드 경로가 manifest.json/final-report.json 두 파일뿐인지 검사하고, 이 JSON과 prepare/finalize stdout/stderr에 원문 party/court/case 또는 party/court 단순 SHA-256이 없는지 검증한다. private 입력 원값 유지, 안정적 row_id, 320행 원순서 및 신규199 기준도 확인한다. workflow·permissions·secret 참조는 이번 수정에서 변경하지 않았다.
+
+위와 동일한 명령으로 복구 **16 PASS**, 전체 **81 PASS(25.450초), skip 없음**, diff 검사 통과. 독립 검토자 `/root/resume_review`도 실제 diff를 읽고 복구16개를 재실행해 **16 PASS(6.149초)**를 확인했다. 로그는 `/tmp/sellingpoint-privacy-full-tests.log`, `/tmp/sellingpoint-privacy-independent.log`. 실제 외부 요청·업로드·Actions는 실행하지 않았다.

@@ -1,5 +1,5 @@
 """Exercise local guard and inspect bodies; never dispatch a GitHub workflow."""
-from contextlib import ExitStack, redirect_stdout
+from contextlib import ExitStack, redirect_stdout, redirect_stderr
 import io
 import json
 import os
@@ -61,6 +61,59 @@ class RecoveryWorkflowTests(unittest.TestCase):
             self.assertNotIn('"court-search/$INPUT_FILE" court-search/output.xlsx',body)
             self.assertIn('resume_batch.py finalize',body)
             self.assertIn('path: ${{ env.COURT_FINAL_OUTPUT }}',body)
+
+    def test_public_manifests_and_new_logs_exclude_private_canaries(self):
+        with ExitStack() as stack:
+            tmp=Path(stack.enter_context(tempfile.TemporaryDirectory()))
+            fixture=SyntheticEvidence()
+            party_canary='PRIVATE_PARTY_CANARY_7429'
+            court_canary='PRIVATE_COURT_CANARY_5183'
+            fixture.source=[fixture.source[0]]+[(court_canary,r[1],party_canary) for r in fixture.source[1:]]
+            fixture.blob=workbook_bytes(fixture.source)
+            for artifact_id,start,end,_ in list(fixture.pins):
+                fixture.set_archive(artifact_id,start,end,fixture.results(start,end))
+            fixture.patches(stack)
+            root=tmp/'evidence';logs=io.StringIO();errors=io.StringIO()
+            pending=tmp/'pending.xlsx'
+            pending.write_bytes(workbook_bytes(fixture.results(121,320)))
+            with redirect_stdout(logs),redirect_stderr(errors):
+                R.prepare(root,fixture.fetch)
+                report=R.finalize(root,pending,tmp/'final.xlsx')
+                again=tmp/'second-evidence';R.prepare(again,fixture.fetch)
+            self.assertEqual(root.stat().st_mode & 0o777,0o700)
+            # Private source/remaining retain exact identities for runtime validation.
+            self.assertEqual(R.table((root/'source.xlsx').read_bytes())[1][2],party_canary)
+            self.assertEqual(R.table((root/'remaining.xlsx').read_bytes())[1][2],party_canary)
+            final=R.table((tmp/'final.xlsx').read_bytes())
+            self.assertEqual(len(final),321)
+            self.assertEqual([(r[0],r[1]) for r in final[1:]],[(r[0],r[1]) for r in fixture.source[1:]])
+            self.assertEqual(report['queryable'],199)
+            manifest=json.loads((root/'manifest.json').read_text())
+            self.assertEqual(manifest,json.loads((again/'manifest.json').read_text()))
+            self.assertEqual(len(manifest['rows']),320)
+            for index,row in enumerate(manifest['rows'],1):
+                self.assertEqual(set(row),{'index','excel_row','row_id'})
+                self.assertEqual((row['index'],row['excel_row']),(index,index+1))
+                expected=R.sha256(f'court-resume-row-v1:{R.SOURCE_RUN}:{R.SOURCE_SHA}:{R.INPUT_SHA256}:{index}:{index+1}'.encode())
+                self.assertEqual(row['row_id'],expected)
+            # Check both actual workflow upload stanzas, not an invented path list.
+            uploads=TEXT.split('      - name: 복구 원행 매니페스트 보관\n')[1:]
+            self.assertEqual(len(uploads),2)
+            public=[]
+            for upload in uploads:
+                stanza=upload.split('\n      - name:',1)[0]
+                paths=stanza.split('          path: |\n',1)[1].split('          if-no-files-found:',1)[0]
+                selected=[line.strip().replace('${{ env.COURT_RESUME_DIR }}',str(root)) for line in paths.splitlines() if line.strip()]
+                self.assertEqual(selected,[str(root/'manifest.json'),str(root/'final-report.json')])
+                public.extend(Path(path).read_text() for path in selected)
+            public.extend([logs.getvalue(),errors.getvalue()])
+            for text in public:
+                for forbidden in (party_canary,court_canary,R.sha256(party_canary.encode()),R.sha256(court_canary.encode())):
+                    self.assertNotIn(forbidden,text)
+                for row in fixture.source[1:]:self.assertNotIn(row[1],text)
+            self.assertNotIn('"party"',public[0])
+            self.assertNotIn('"court"',public[0])
+            self.assertNotIn('"case_no"',public[0])
 
     def test_actual_primary_inspect_keeps_199_connection_denominator_after_merge(self):
         with ExitStack() as stack:
