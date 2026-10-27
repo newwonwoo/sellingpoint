@@ -1706,7 +1706,9 @@ async def search_one(
 class PartialResultPublisher:
     """완료된 입력 순서 구간을 검색과 별도인 업로드 큐에서 공개한다."""
 
-    def __init__(self, results: list[dict]):
+    def __init__(self, results: list[dict], row_offset=0, seed_paths=()):
+        self.row_offset = row_offset
+        self.seed_paths = seed_paths
         self.results = results
         self.total = len(results)
         output_dir = os.environ.get('COURT_PARTIAL_DIR', '').strip()
@@ -1734,6 +1736,9 @@ class PartialResultPublisher:
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.artifact_queue_dir.mkdir(parents=True, exist_ok=True)
         self.worker_task = asyncio.create_task(self._upload_worker())
+        revision_tag = f'r{self.revision_base}-' if self.revision_base else ''
+        for start, end, path in self.seed_paths:
+            self.queue.put_nowait((f'court-search-partial-{revision_tag}{start:04d}-{end:04d}', path))
         print(f"중간 결과: {self.chunk_size}건 단위로 다운로드 파일을 공개합니다.")
 
     async def publish_ready(self):
@@ -1766,7 +1771,7 @@ class PartialResultPublisher:
                     )
 
     async def _write_and_enqueue(self, start, end, chunk, revision):
-        tag = f"{start + 1:04d}-{end:04d}"
+        tag = f"{start + 1 + self.row_offset:04d}-{end + self.row_offset:04d}"
         suffix = f"-r{revision}" if revision else ''
         path = self.output_dir / f"court-search-{tag}{suffix}.xlsx"
         await asyncio.to_thread(write_output, [dict(row) for row in chunk], str(path))
@@ -1844,7 +1849,14 @@ async def main():
         print(f"입력 파일 없음: {input_path}")
         sys.exit(1)
 
+    row_offset, seed_paths = 0, ()
+    if os.environ.get('COURT_RESUME_DIR'):
+        from resume_batch import OFFSET, verify_remaining
+        _, _, seed_paths = verify_remaining(input_path, os.environ['COURT_RESUME_DIR'])
+        row_offset = OFFSET
     cases = read_input(input_path)
+    for case in cases:
+        case['row'] += row_offset
     print(f"총 {len(cases)}건 조회 시작\n")
 
     results = [{} for _ in cases]
@@ -1860,7 +1872,7 @@ async def main():
         print(f"⚠ 사건번호 입력오류 {len(cases) - len(valid_indices)}건: "
               "원 입력을 보존하여 오류 행으로 저장하고 나머지만 조회합니다.")
     if not valid_indices:
-        publisher = PartialResultPublisher(results)
+        publisher = PartialResultPublisher(results, row_offset, seed_paths)
         await publisher.start()
         write_output(results, output_path)
         await publisher.close()
@@ -1911,7 +1923,7 @@ async def main():
     else:
         print(f"조회 워커 {worker_count}개로 실행합니다.")
 
-    partial_publisher = PartialResultPublisher(results)
+    partial_publisher = PartialResultPublisher(results, row_offset, seed_paths)
     await partial_publisher.start()
     connection_circuit = {
         'failed_sessions': set(),
@@ -2051,7 +2063,7 @@ async def main():
                         continue
                     case = cases[idx]
                     print(
-                        f"[구조대 {idx + 1}/{len(cases)} 워커 {worker_id + 1}]",
+                        f"[구조대 {idx + 1 + row_offset}/{len(cases) + row_offset} 워커 {worker_id + 1}]",
                         end=' ',
                     )
                     try:
@@ -2097,8 +2109,10 @@ async def main():
                     case = cases[idx]
                     if retry:
                         prefix = f"재시도 {retry_positions[idx]}/{retry_total}"
+                        if row_offset:
+                            prefix += f" 원순번 {idx + 1 + row_offset}"
                     else:
-                        prefix = f"{idx + 1}/{len(cases)}"
+                        prefix = f"{idx + 1 + row_offset}/{len(cases) + row_offset}"
                     print(f"[{prefix} 워커 {worker_id + 1}]", end=' ')
                     started_at = asyncio.get_running_loop().time()
                     try:
@@ -2125,7 +2139,7 @@ async def main():
                             immediate_retry_queue.put_nowait(idx)
                             print(
                                 f"  🚑 실패 사건 즉시 구조대 대기열 등록: "
-                                f"{idx + 1}/{len(cases)}"
+                                f"{idx + 1 + row_offset}/{len(cases) + row_offset}"
                             )
                         if not retry:
                             await partial_publisher.publish_ready()

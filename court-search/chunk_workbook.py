@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 from copy import copy
 from datetime import datetime
 from pathlib import Path
@@ -66,18 +67,23 @@ def print_count(path: Path):
 
 def write_blocked_output(source: Path, target: Path, reason: str):
     """연결 진단 실패 시 실제 조회 없이 모든 입력을 보류 결과로 남긴다."""
+    row_offset = 0
+    if os.environ.get('COURT_RESUME_DIR'):
+        from resume_batch import OFFSET, verify_remaining
+        verify_remaining(source, os.environ['COURT_RESUME_DIR'])
+        row_offset = OFFSET
     header, rows = input_rows(source)
     columns = {str(value).strip(): index for index, value in enumerate(header)}
     checked_at = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     results = []
-    for row in rows:
+    for excel_row, row in enumerate(rows, 2 + row_offset):
         case_no = row[columns['사건번호']]
         status = f'조회보류: {reason}'
         try:
             parse_case_no(case_no)
         except ValueError as error:
             status = f'입력오류: {error}'
-            print(f'⚠ 원 사건번호 {case_no!r}: {status}')
+            print(f'⚠ 입력 {excel_row}행 / 원 사건번호 {case_no!r}: {status}')
         results.append({header: '' for header in OUTPUT_HEADERS} | {
             '법원': str(row[columns['법원']]).strip(),
             '사건번호': case_no,
