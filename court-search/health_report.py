@@ -51,6 +51,13 @@ def build_report(connection: dict, diagnosis: str, lookup: str,
         ):
             mismatch_detected = True
 
+    not_attempted_count = sum(
+        index >= len(rows)
+        or not isinstance(rows[index], dict)
+        or str(rows[index].get("사건명") or "").strip().startswith("조회보류")
+        for index in range(len(expected))
+    )
+    attempted_count = max(0, len(expected) - not_attempted_count)
     all_cases_valid = (
         bool(expected)
         and len(rows) == len(expected)
@@ -74,7 +81,13 @@ def build_report(connection: dict, diagnosis: str, lookup: str,
         }]
         # 조회기의 FORM/CAPTCHA 이벤트에는 리소스 로딩 상태가 없다.
         # 재접속 중 미완성 화면일 수도 있어 사전 진단의 화면 판정과 구분한다.
-        if protocols:
+        case_not_found = [
+            event for event in protocols
+            if (event.get("details") or {}).get("error_code") == "I_0002"
+        ]
+        if case_not_found:
+            classification = "CANARY_CASE_NOT_FOUND"
+        elif protocols:
             code = (protocols[-1].get("details") or {}).get("http_status")
             classification = http_classification(code) or (
                 "NETWORK_ERROR" if code == 0 else "LOOKUP_UNAVAILABLE"
@@ -97,6 +110,7 @@ def build_report(connection: dict, diagnosis: str, lookup: str,
             "LOOKUP_TIMEOUT": "검증 조회 시간초과 — 구조 변경 판정 보류",
             "CANARY_MISMATCH": "검증 사건 결과 불일치 — 구조 변경 판정 보류",
             "LOOKUP_UNAVAILABLE": "검증 조회 미완료 — 구조 변경 판정 보류",
+            "CANARY_CASE_NOT_FOUND": "검증 사건 없음 응답 — 법원·사건번호 확인 필요",
         }.get(classification, classification))
 
     return {
@@ -118,7 +132,9 @@ def build_report(connection: dict, diagnosis: str, lookup: str,
             "expectedCount": len(expected),
             "returnedCount": len(rows),
             "matchedCount": matched_count,
-            "failedCount": max(0, len(rows) - matched_count),
+            "attemptedCount": attempted_count,
+            "notAttemptedCount": not_attempted_count,
+            "failedCount": max(0, attempted_count - matched_count),
             "notReturnedCount": max(0, len(expected) - len(rows)),
             "baselineCaseNameMatched": baseline_case_name_matched,
         },
