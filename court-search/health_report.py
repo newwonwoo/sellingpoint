@@ -82,8 +82,9 @@ def build_report(connection: dict, diagnosis: str, lookup: str,
         # 조회기의 FORM/CAPTCHA 이벤트에는 리소스 로딩 상태가 없다.
         # 재접속 중 미완성 화면일 수도 있어 사전 진단의 화면 판정과 구분한다.
         case_not_found = [
-            event for event in protocols
-            if (event.get("details") or {}).get("error_code") == "I_0002"
+            event for event in events
+            if event.get("classification") == "API_CASE_NOT_FOUND"
+            or (event.get("details") or {}).get("error_code") == "I_0002"
         ]
         if case_not_found:
             classification = "CANARY_CASE_NOT_FOUND"
