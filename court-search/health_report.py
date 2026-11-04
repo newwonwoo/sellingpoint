@@ -10,22 +10,60 @@ from pathlib import Path
 from connection_probe import MESSAGES, STRUCTURE_CLASSIFICATIONS, http_classification
 
 
+DEFAULT_CASES = [{
+    "court": "서울남부지방법원",
+    "case_no": "2026타인3944",
+    "expected_name": "부동산인도명령",
+}]
+
+
 def build_report(connection: dict, diagnosis: str, lookup: str,
-                 result: dict, events: list[dict], run_url: str = "") -> dict:
-    rows = result.get("results") or []
-    rows = rows if isinstance(rows, list) else []
-    row = rows[0] if rows and isinstance(rows[0], dict) else {}
-    name = str(row.get("사건명") or "")
-    valid = row.get("사건번호") == "2026타인3944" and "부동산인도명령" in name and not name.startswith(("조회실패", "조회보류"))
+                 result: dict, events: list[dict], run_url: str = "",
+                 expected_cases: list[dict] | None = None) -> dict:
+    expected = expected_cases or DEFAULT_CASES
+    raw_rows = result.get("results") or []
+    rows = raw_rows if isinstance(raw_rows, list) else []
+    matched_count = 0
+    baseline_case_name_matched = False
+    mismatch_detected = False
+    names = []
+
+    for index, expected_case in enumerate(expected):
+        row = rows[index] if index < len(rows) and isinstance(rows[index], dict) else {}
+        case_no = str(expected_case.get("case_no") or expected_case.get("caseNo") or "")
+        returned_case_no = str(row.get("사건번호") or "")
+        name = str(row.get("사건명") or "").strip()
+        names.append(name)
+        expected_name = str(expected_case.get("expected_name") or "").strip()
+        is_error = not name or name.startswith(("조회실패", "조회보류"))
+        case_matches = bool(case_no) and returned_case_no == case_no
+        name_matches = not is_error and name != "사건없음"
+        if expected_name:
+            name_matches = name_matches and expected_name in name
+            if case_no == "2026타인3944":
+                baseline_case_name_matched = name_matches and case_matches
+        if case_matches and name_matches:
+            matched_count += 1
+        elif name and not is_error and (
+            not case_matches or name == "사건없음" or (expected_name and expected_name not in name)
+        ):
+            mismatch_detected = True
+
+    all_cases_valid = (
+        bool(expected)
+        and len(rows) == len(expected)
+        and matched_count == len(expected)
+    )
     classification = connection.get("classification") or "DIAGNOSIS_UNAVAILABLE"
     status = "unavailable"
     message = connection.get("message") or "접속 진단 결과 미확인"
+
     if diagnosis != "success" or not connection.get("success"):
         if classification in STRUCTURE_CLASSIFICATIONS:
             status = "structure_changed"
-    elif lookup == "success" and valid:
+    elif lookup == "success" and all_cases_valid:
         status, classification = "healthy", "HEALTHY"
-        message = "법원 사이트 통신·화면·API 구조 정상"
+        message = f"법원 사이트 통신·화면·검증 조회 {len(expected)}건 정상"
     else:
         # HTTP 오류/전송 실패를 구조 이벤트보다 먼저 판별한다.
         protocols = [e for e in events if e.get("classification") == "API_PROTOCOL_ERROR"]
@@ -39,13 +77,15 @@ def build_report(connection: dict, diagnosis: str, lookup: str,
             classification = http_classification(code) or (
                 "NETWORK_ERROR" if code == 0 else "LOOKUP_UNAVAILABLE"
             )
-        elif any(token in name for token in ("연결 실패", "접속 불가", "전체 접속 장애")):
+        elif any(token in name for name in names for token in (
+            "연결 실패", "접속 불가", "전체 접속 장애",
+        )):
             classification = "NETWORK_ERROR"
-        elif "시간 초과" in name:
+        elif any("시간 초과" in name for name in names):
             classification = "LOOKUP_TIMEOUT"
         elif structure:
             status, classification = "structure_changed", structure[-1]["classification"]
-        elif name and not name.startswith(("조회실패", "조회보류")):
+        elif mismatch_detected:
             classification = "CANARY_MISMATCH"
         else:
             classification = "LOOKUP_UNAVAILABLE"
@@ -56,19 +96,29 @@ def build_report(connection: dict, diagnosis: str, lookup: str,
             "CANARY_MISMATCH": "검증 사건 결과 불일치 — 구조 변경 판정 보류",
             "LOOKUP_UNAVAILABLE": "검증 조회 미완료 — 구조 변경 판정 보류",
         }.get(classification, classification))
+
     return {
-        "status": status, "classification": classification, "message": message,
+        "status": status,
+        "classification": classification,
+        "message": message,
         "checkedAt": datetime.now(timezone.utc).isoformat(timespec="seconds"),
         "fingerprint": (connection.get("browser", {}).get("contract") or {}).get("fingerprint", ""),
         "runUrl": run_url,
-        "diagnosisOutcome": diagnosis, "lookupOutcome": lookup,
+        "diagnosisOutcome": diagnosis,
+        "lookupOutcome": lookup,
         "connection": {
             "classification": connection.get("classification"),
             "failureStage": connection.get("failure_stage"),
             "attemptCount": connection.get("attempt_count"),
             "networkDiagnosis": connection.get("network_diagnosis"),
         },
-        "canary": {"court": "서울남부지방법원", "caseNo": "2026타인3944", "caseNameMatched": valid},
+        "canary": {
+            "expectedCount": len(expected),
+            "returnedCount": len(rows),
+            "matchedCount": matched_count,
+            "failedCount": max(0, len(expected) - matched_count),
+            "baselineCaseNameMatched": baseline_case_name_matched,
+        },
     }
 
 
@@ -92,10 +142,14 @@ def main() -> None:
                     events.append(event)
             except ValueError:
                 continue
+    canary_input = read_json(root / "canary-input.json")
+    expected_cases = canary_input.get("cases")
+    if not isinstance(expected_cases, list) or not expected_cases:
+        expected_cases = DEFAULT_CASES
     report = build_report(
         read_json(root / "connection.json"), os.getenv("DIAGNOSIS_OUTCOME", ""),
         os.getenv("LOOKUP_OUTCOME", ""), read_json(root / "canary-result.json"),
-        events, os.getenv("RUN_URL", ""),
+        events, os.getenv("RUN_URL", ""), expected_cases,
     )
     root.mkdir(parents=True, exist_ok=True)
     (root / "health-report.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
