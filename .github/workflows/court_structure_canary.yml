@@ -3,8 +3,8 @@ name: 법원 사이트 구조 정기점검
 on:
   workflow_dispatch:
   schedule:
-    # 매일 한국시간 오전 7시 15분. 업무 시작 전 구조 변경을 먼저 찾는다.
-    - cron: '15 22 * * *'
+    # 매일 한국시간 오전 7시. 업무 시작 전 구조 변경을 먼저 찾는다.
+    - cron: '0 22 * * *'
 
 permissions:
   contents: read
@@ -72,14 +72,46 @@ jobs:
           "$COURT_PYTHON" - <<'PY'
           import json
           from pathlib import Path
+          import openpyxl
+
+          source = Path('court-search/test_input_user_cases.xlsx')
+          workbook = openpyxl.load_workbook(source, data_only=True, read_only=True)
+          sheet = workbook.active
+          headers = {
+              str(cell.value).strip(): cell.column - 1
+              for cell in sheet[1]
+              if cell.value is not None
+          }
+          required = {'법원', '사건번호', '당사자명'}
+          if not required.issubset(headers):
+              raise SystemExit('테스트 사건 파일의 필수 열이 없습니다.')
+
+          cases = []
+          for row in sheet.iter_rows(min_row=2, values_only=True):
+              court = row[headers['법원']] if headers['법원'] < len(row) else None
+              case_no = row[headers['사건번호']] if headers['사건번호'] < len(row) else None
+              party = row[headers['당사자명']] if headers['당사자명'] < len(row) else None
+              if not court and not case_no:
+                  continue
+              if not court or not case_no:
+                  raise SystemExit('테스트 사건에 법원 또는 사건번호가 비어 있습니다.')
+              cases.append({
+                  'court': str(court).strip(),
+                  'case_no': str(case_no).strip(),
+                  'party': str(party).strip() if party is not None else '',
+              })
+
+          if len(cases) < 10:
+              raise SystemExit(f'테스트 사건 10건이 필요합니다. 현재 {len(cases)}건입니다.')
+          cases = cases[:10]
+          if cases[0]['case_no'] != '2026타인3944':
+              raise SystemExit('기준 검증 사건이 테스트 파일 첫 행에 없습니다.')
+
           Path('court-search/health/canary-input.json').write_text(
-              json.dumps({
-                  'court': '서울남부지방법원',
-                  'case_no': '2026타인3944',
-                  'party': '주택',
-              }, ensure_ascii=False),
+              json.dumps({'cases': cases}, ensure_ascii=False),
               encoding='utf-8',
           )
+          print(f'검증 사건 준비 완료: {len(cases)}건 (동시 조회 1건)') 
           PY
 
       - name: 통신·화면 구조 진단
@@ -128,7 +160,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: court-structure-health
-          path: court-search/health
+          path: |
+            court-search/health/health-report.json
+            court-search/health/connection.json
+            court-search/health/debug/connection
           if-no-files-found: error
           retention-days: 30
 
