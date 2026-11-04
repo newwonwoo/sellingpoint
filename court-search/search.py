@@ -870,6 +870,7 @@ async def direct_api_result(
             {
                 'http_status': http_status,
                 'payload_status': payload.get('status'),
+                'error_code': errors.get('errorCode'),
                 'schema': json_schema_snapshot(payload),
                 'basic_endpoint': f'{base_url}/selectHmpgEtexecCsGnrlCtt.on',
             },
