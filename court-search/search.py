@@ -858,6 +858,20 @@ async def direct_api_result(
     if '캡챠' in combined_message or '방지문자' in combined_message:
         print('  캡차 불일치 → 새 문자로 재시도')
         return 'captcha_mismatch', None
+    if errors.get('errorCode') == 'I_0002':
+        print('  ℹ 법원 API 사건 없음 응답 (I_0002)')
+        await save_contract_debug(
+            page,
+            case_no,
+            'API_CASE_NOT_FOUND',
+            {
+                'http_status': http_status,
+                'payload_status': payload.get('status'),
+                'error_code': errors.get('errorCode'),
+                'basic_endpoint': f'{base_url}/selectHmpgEtexecCsGnrlCtt.on',
+            },
+        )
+        return 'case_not_found', None
     if http_status != 200 or int(payload.get('status') or 0) != 200:
         print(
             f"  ⚠ JSON 기본내용 조회 실패: HTTP {http_status}, "
@@ -1451,6 +1465,14 @@ async def search_one(
                         captcha_image, captcha_answer, captcha_source
                     )
                     return await finish(direct_result, result_page=False)
+                if direct_status == 'case_not_found':
+                    session_state['captcha_consumed'] = True
+                    not_found_result = {h: '' for h in OUTPUT_HEADERS} | {
+                        '법원': court, '사건번호': case_no,
+                        '사건명': '사건없음',
+                        '조회일시': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+                    }
+                    return await finish(not_found_result, result_page=False)
                 if direct_status == 'captcha_mismatch':
                     session_state['captcha_consumed'] = True
                     continue
