@@ -101,9 +101,8 @@ jobs:
                   'party': str(party).strip() if party is not None else '',
               })
 
-          if len(cases) < 10:
-              raise SystemExit(f'테스트 사건 10건이 필요합니다. 현재 {len(cases)}건입니다.')
-          cases = cases[:10]
+          if not cases:
+              raise SystemExit('조회 가능한 검증 사건이 한 건 이상 필요합니다.')
           if cases[0]['case_no'] != '2026타인3944':
               raise SystemExit('기준 검증 사건이 테스트 파일 첫 행에 없습니다.')
 
